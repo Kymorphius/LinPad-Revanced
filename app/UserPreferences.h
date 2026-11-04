@@ -55,6 +55,8 @@ extern NSString *const kThemeBackgroundColor;
 @property (nonatomic) Theme *theme;
 @property (nonatomic) Palette *palette;
 @property BOOL shouldDisableDimming;
+// Linux reaches the outside only through its transparent proxy (fs/sockredirect.h)
+@property BOOL netlock;
 @property (null_resettable) NSString *fontFamily;
 @property (readonly) NSString *fontFamilyUserFacingName;
 @property (readonly) UIFont *approximateFont;

@@ -32,6 +32,9 @@ NSString *const kHostnameOverrideKey = @"hostnameOverride";
 // iPad Settings › SSH and desktop Settings; Linux reads it at boot as
 // /proc/ish/defaults/ssh_autostart (tools/setup_guest_ssh.sh, linpad-ssh-start --boot).
 static NSString *const kPreferenceSSHAutostartKey = @"ssh.autostart";
+// iPad Settings › Network; also /proc/ish/defaults/netlock. Applied before the first
+// process starts and whenever it changes (fs/sockredirect.h).
+static NSString *const kPreferenceNetlockKey = @"network.netlock";
 
 NSDictionary<NSString *, NSString *> *friendlyPreferenceMapping;
 NSDictionary<NSString *, NSString *> *friendlyPreferenceReverseMapping;
@@ -172,6 +175,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceThemeKey: @"Default",
             kHostnameOverrideKey: UIDevice.currentDevice.name,
             kPreferenceSSHAutostartKey: @YES,
+            kPreferenceNetlockKey: @NO,
         }];
         // https://webkit.org/blog/10247/new-webkit-features-in-safari-13-1/
         if (@available(iOS 13.4, *)) {
@@ -207,6 +211,7 @@ bool (*remove_user_default)(const char *name);
             @"theme": kPreferenceThemeKey,
             @"hostname_override": kHostnameOverrideKey,
             @"ssh_autostart": kPreferenceSSHAutostartKey,
+            @"netlock": kPreferenceNetlockKey,
         };
         NSMutableDictionary <NSString *, NSString *> *reverseMapping = [NSMutableDictionary new];
         for (NSString *key in friendlyPreferenceMapping) {
@@ -224,6 +229,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceFontFamilyKey: property(fontFamily),
             kPreferenceFontSizeKey: property(fontSize),
             kPreferenceDisableDimmingKey: property(shouldDisableDimming),
+            kPreferenceNetlockKey: property(netlock),
             kPreferenceLaunchCommandKey: property(launchCommand),
             kPreferenceBootCommandKey: property(bootCommand),
             kPreferenceCursorStyleKey: property(cursorStyle),
@@ -422,6 +428,15 @@ bool (*remove_user_default)(const char *name);
 
 - (BOOL)validateShouldDisableDimming:(id *)value error:(NSError **)error {
     return [*value isKindOfClass:NSNumber.class];
+}
+
+// MARK: netlock
+- (BOOL)netlock {
+    return [_defaults boolForKey:kPreferenceNetlockKey];
+}
+
+- (void)setNetlock:(BOOL)netlock {
+    [_defaults setBool:netlock forKey:kPreferenceNetlockKey];
 }
 
 // MARK: launchCommand

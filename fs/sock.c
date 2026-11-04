@@ -541,27 +541,55 @@ static bool unix_cred_take(struct fd *sock, bool peek, struct ucred_ *out) {
 
 // The host connect() for a guest connect() or fast-open send: while the
 // transparent proxy holds its lease, an outside TCP destination is replaced by
-// the proxy, and the original is kept for its SO_ORIGINAL_DST query.
+// the proxy, and the original is kept for its SO_ORIGINAL_DST query. Under the
+// netlock, what may not reach the outside fails with EPERM (fs/sockredirect.h).
 static int sock_host_connect(struct fd *sock, struct sockaddr_max_ *sockaddr, socklen_t len) {
+    const struct sockaddr *dst = (const struct sockaddr *) sockaddr;
+    bool inet = sock->socket.domain == AF_INET_ || sock->socket.domain == AF_INET6_;
+    // A retry of a direct non-blocking connect only asks how it is going.
+    if (!inet || (sock->socket.inet_connect_pending && sock->socket.redirect_to_port == 0))
+        return connect(sock->real_fd, (void *) sockaddr, len);
     struct sockaddr_storage target;
     socklen_t target_len;
-    bool redirect = (sock->socket.domain == AF_INET_ || sock->socket.domain == AF_INET6_) &&
-        sock->socket.type == SOCK_STREAM_ &&
-        sockredirect_target((struct sockaddr *) sockaddr, current->euid, sock->socket.redirect_to_port,
-                &target, &target_len);
-    if (!redirect)
-        return connect(sock->real_fd, (void *) sockaddr, len);
+    int verdict = sock->socket.type == SOCK_STREAM_ ?
+        sockredirect_tcp(dst, current->euid, sock->socket.redirect_to_port, &target, &target_len) :
+        sockredirect_datagram(dst, current->euid);
+    if (verdict < 0) {
+        errno = EPERM;
+        return -1;
+    }
+    if (verdict == 0) {
+        int err = connect(sock->real_fd, (void *) sockaddr, len);
+        int saved = errno;
+        // A direct connection to the outside: its sends are checked against
+        // the netlock too, in case it comes on later (sock_netlock_check).
+        if (err == 0 || saved == EINPROGRESS)
+            sock->socket.inet_peer_outside = sockredirect_outside(dst);
+        errno = saved;
+        return err;
+    }
     int err = connect(sock->real_fd, (struct sockaddr *) &target, target_len);
     int saved = errno;
     if ((err == 0 || saved == EINPROGRESS) && sock->socket.redirect_local_port == 0) {
         sock->socket.redirect_to_port = ntohs(target.ss_family == AF_INET
                 ? ((struct sockaddr_in *) &target)->sin_port
                 : ((struct sockaddr_in6 *) &target)->sin6_port);
-        sock->socket.redirect_local_port = sockredirect_remember(sock->real_fd, (struct sockaddr *) sockaddr,
+        sock->socket.redirect_local_port = sockredirect_remember(sock->real_fd, dst,
                 &sock->socket.redirect_local_v6);
     }
     errno = saved;
     return err;
+}
+
+// Under the netlock, nothing may be sent to the outside except through the
+// proxy: a datagram to the address it carries, or anything on a socket
+// connected directly to an outside peer. 0 or _EPERM.
+static int sock_netlock_check(struct fd *sock, const struct sockaddr_max_ *to) {
+    if (sock->socket.domain != AF_INET_ && sock->socket.domain != AF_INET6_)
+        return 0;
+    if (to != NULL && sock->socket.type != SOCK_STREAM_)
+        return sockredirect_datagram((const struct sockaddr *) to, current->euid);
+    return sock->socket.inet_peer_outside ? sockredirect_locked(current->euid) : 0;
 }
 
 int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
@@ -988,6 +1016,9 @@ static int_t do_sendto(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t fl
             goto error;
         sockaddr_addr = 0;
     }
+    err = sock_netlock_check(sock, sockaddr_addr ? &sockaddr : NULL);
+    if (err < 0)
+        goto error;
 
     send_order_begin(sock);
     struct cred_entry *cred_entry = record_send_cred(sock, NULL);
@@ -1838,6 +1869,9 @@ static int_t do_sendmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
     } else {
         msg.msg_name = NULL;
     }
+    err = sock_netlock_check(sock, msg.msg_name != NULL ? &msg_name : NULL);
+    if (err < 0)
+        return err;
 
     // msg_iovec
 #ifdef GUEST_ARM64
@@ -2466,6 +2500,9 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
     int eintr_count = 0;
     if (fd->socket.domain == AF_NETLINK_)
         return netlink_send(fd, buf, size);
+    err = sock_netlock_check(fd, NULL);
+    if (err < 0)
+        return err;
     send_order_begin(fd);
     struct cred_entry *cred_entry = record_send_cred(fd, NULL);
     for (;;) {

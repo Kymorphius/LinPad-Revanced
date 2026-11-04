@@ -56,6 +56,24 @@
 		</dict>
 		<dict>
 			<key>FooterText</key>
+			<string>Linux programs reach the internet only through the transparent proxy running in Linux. While the proxy is not running, connections to the internet fail instead of going direct. The local network, Tailscale and loopback stay reachable. Takes effect at once.</string>
+			<key>Title</key>
+			<string>Network</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<false/>
+			<key>Key</key>
+			<string>network.netlock</string>
+			<key>Title</key>
+			<string>Netlock</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>FooterText</key>
 			<string>For when the desktop is not usable. Repair puts back the system files that ship with the app and keeps all your data; it runs once the desktop has started. A reset reinstalls the Linux system at the next launch: Keep My Files keeps /root and /home, Erase Everything deletes them. A reset runs only with RESET typed below; both fields clear themselves at the next launch.</string>
 			<key>Title</key>
 			<string>Maintenance</string>

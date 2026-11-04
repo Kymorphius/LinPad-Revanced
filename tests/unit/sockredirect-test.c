@@ -64,12 +64,14 @@ static struct sockaddr_storage v6(const char *ip, unsigned port) {
     return s;
 }
 
-// Whether dst is redirected, and to which "address:port" text.
-static bool target_text(struct sockaddr_storage dst, unsigned euid, uint16_t fixed, char *out) {
+// The verdict for a TCP connect to dst: 1 with the proxy's "address:port" in
+// out, 0 for direct, or _EPERM.
+static int verdict(struct sockaddr_storage dst, unsigned euid, uint16_t fixed, char *out) {
     struct sockaddr_storage t;
     socklen_t len;
-    if (!sockredirect_target((struct sockaddr *) &dst, euid, fixed, &t, &len))
-        return false;
+    int v = sockredirect_tcp((struct sockaddr *) &dst, euid, fixed, &t, &len);
+    if (v != 1)
+        return v;
     char ip[INET6_ADDRSTRLEN];
     if (t.ss_family == AF_INET) {
         struct sockaddr_in *a = (struct sockaddr_in *) &t;
@@ -82,7 +84,11 @@ static bool target_text(struct sockaddr_storage dst, unsigned euid, uint16_t fix
         inet_ntop(AF_INET6, &a->sin6_addr, ip, sizeof(ip));
         sprintf(out, "[%s]:%u", ip, ntohs(a->sin6_port));
     }
-    return true;
+    return 1;
+}
+
+static bool target_text(struct sockaddr_storage dst, unsigned euid, uint16_t fixed, char *out) {
+    return verdict(dst, euid, fixed, out) == 1;
 }
 
 static void test_policy(void) {
@@ -136,6 +142,66 @@ static void test_policy(void) {
     CHECK(update("exempt_uid none\ntcp_port 7890\nlease 60\n", 0) == 0);
     CHECK(strstr(show(), "exempt_uid none\n") && target_text(v4("93.184.216.34", 443), 901, 0, t));
     printf("PASS lease, uid exemption, bypass list, families and atomic control writes\n");
+}
+
+static int datagram(struct sockaddr_storage dst, unsigned euid) {
+    return sockredirect_datagram((struct sockaddr *) &dst, euid);
+}
+
+// Fail closed: nothing reaches an outside address except through the proxy or
+// as the exempt uid, whether the lease is current or not.
+static void test_netlock(void) {
+    char t[80];
+    CHECK(update("tcp_port 7890\nexempt_uid 901\nlease 0\nbypass 10.0.0.0/8 100.64.0.0/10 fe80::/10\n", 0) == 0);
+    CHECK(strstr(show(), "netlock 0\n") && strstr(shown, "blocked 0\n"));
+    // Off: an expired lease means direct, and datagrams go anywhere.
+    CHECK(verdict(v4("93.184.216.34", 443), 0, 0, t) == 0);
+    CHECK(datagram(v4("8.8.8.8", 53), 0) == 0);
+    CHECK(sockredirect_locked(0) == 0);
+
+    CHECK(update("netlock maybe\n", 0) == _EINVAL);
+    CHECK(update("netlock on\n", 1000) == _EPERM);
+    CHECK(update("netlock on\n", 0) == 0);
+    CHECK(strstr(show(), "netlock 1\n") && strstr(shown, "active 0\n"));
+    CHECK(verdict(v4("93.184.216.34", 443), 0, 0, t) == _EPERM);
+    CHECK(verdict(v6("2001:db8::1", 443), 1000, 0, t) == _EPERM);
+    CHECK(verdict(v6("::ffff:93.184.216.34", 80), 1000, 0, t) == _EPERM);
+    CHECK(datagram(v4("8.8.8.8", 53), 0) == _EPERM);
+    CHECK(datagram(v6("2001:4860:4860::8888", 53), 1000) == _EPERM);
+    CHECK(sockredirect_locked(0) == _EPERM);
+    // What stays open: the exempt uid, loopback, unspecified and the bypass list.
+    CHECK(verdict(v4("93.184.216.34", 443), 901, 0, t) == 0);
+    CHECK(datagram(v4("8.8.8.8", 53), 901) == 0);
+    CHECK(sockredirect_locked(901) == 0);
+    CHECK(verdict(v4("127.0.0.1", 53), 0, 0, t) == 0 && datagram(v4("127.0.0.1", 53), 0) == 0);
+    CHECK(datagram(v6("::1", 53), 0) == 0 && datagram(v4("0.0.0.0", 9), 0) == 0);
+    CHECK(verdict(v4("10.1.2.3", 22), 0, 0, t) == 0 && datagram(v4("100.100.100.100", 53), 0) == 0);
+    CHECK(datagram(v6("fe80::1", 5353), 0) == 0);
+    // An address that is not IP is not outside.
+    struct sockaddr_storage unix_addr = {.ss_family = AF_UNIX};
+    CHECK(!sockredirect_outside((struct sockaddr *) &unix_addr));
+    CHECK(sockredirect_outside((struct sockaddr *) &(struct sockaddr_storage) {0}) == false);
+    CHECK(strstr(show(), "blocked 6\n"));
+
+    // A current lease sends TCP to the proxy; datagrams stay blocked.
+    CHECK(update("lease 30\n", 0) == 0);
+    CHECK(target_text(v4("93.184.216.34", 443), 0, 0, t) && strcmp(t, "127.0.0.1:7890") == 0);
+    CHECK(datagram(v4("1.1.1.1", 443), 0) == _EPERM);
+    // A lapsed lease (the manager stopped renewing it) blocks again, but a
+    // retry of a connect already sent to the proxy still goes there.
+    CHECK(update("lease 0\n", 0) == 0);
+    CHECK(verdict(v4("93.184.216.34", 443), 0, 0, t) == _EPERM);
+    CHECK(target_text(v4("93.184.216.34", 443), 0, 7890, t) && strcmp(t, "127.0.0.1:7890") == 0);
+    // Without a proxy port the lease does nothing either.
+    CHECK(update("tcp_port 0\nlease 30\n", 0) == 0);
+    CHECK(verdict(v4("93.184.216.34", 443), 0, 0, t) == _EPERM);
+
+    sockredirect_set_netlock(false);
+    CHECK(strstr(show(), "netlock 0\n"));
+    CHECK(verdict(v4("93.184.216.34", 443), 0, 0, t) == 0 && datagram(v4("8.8.8.8", 53), 0) == 0);
+    sockredirect_set_netlock(true);
+    CHECK(update("netlock off\ntcp_port 7890\nlease 0\n", 0) == 0 && strstr(show(), "netlock 0\n"));
+    printf("PASS netlock blocks outside TCP without a lease and outside datagrams, but not the exempt uid or bypass\n");
 }
 
 // A real loopback connection standing in for guest client and proxy.
@@ -199,6 +265,7 @@ static void test_original_destination(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     test_policy();
+    test_netlock();
     test_original_destination();
     return 0;
 }

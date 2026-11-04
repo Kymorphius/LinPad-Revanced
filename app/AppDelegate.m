@@ -33,6 +33,7 @@
 #include "fs/dyndev.h"
 #include "fs/devices.h"
 #include "fs/path.h"
+#include "fs/sockredirect.h"
 #if defined(GUEST_ARM64) && defined(DEBUG)
 #include "DebugServer.h"
 #endif
@@ -592,6 +593,20 @@ static void RequestFastMode(BOOL afterBoot, void (^done)(BOOL on)) {
     fs_register(&iosfs);
     fs_register(&iosfs_unsafe);
 
+    // The netlock holds from the first process on. A change of the preference (iPad
+    // Settings, /proc/ish/defaults/netlock) applies at once; other preference changes
+    // leave alone what root set in /proc/ish/transparent_proxy since.
+    static BOOL netlockPreference;
+    netlockPreference = UserPreferences.shared.netlock;
+    sockredirect_set_netlock(netlockPreference);
+    [UserPreferences.shared observe:@[@"netlock"] options:0 owner:self usingBlock:^(typeof(self) self) {
+        BOOL netlock = UserPreferences.shared.netlock;
+        if (netlock != netlockPreference) {
+            netlockPreference = netlock;
+            sockredirect_set_netlock(netlock);
+        }
+    }];
+
     // The cameras become /dev/video0 and /dev/video1 (fs/dev_video.c); they must be
     // registered before the first process creates the device nodes. By name, because
     // this file is also built into targets without Swift.
@@ -747,6 +762,20 @@ void SyncHostname(void) {
     }
     
     current = pid_get_task(1);
+    // A resolv.conf that Linux manages itself says so with a "# linpad: keep" line, as
+    // a proxy manager's does when it points the system at its proxy's DNS: under the netlock
+    // the iOS servers are not reachable anyway.
+    struct fd *existing = generic_open("/etc/resolv.conf", O_RDONLY_, 0);
+    if (!IS_ERR(existing)) {
+        char text[4096];
+        ssize_t n = existing->ops->read(existing, text, sizeof(text) - 1);
+        fd_close(existing);
+        if (n > 0) {
+            text[n] = '\0';
+            if (strstr(text, "# linpad: keep") != NULL)
+                return;
+        }
+    }
     struct fd *fd = generic_open("/etc/resolv.conf", O_WRONLY_ | O_CREAT_ | O_TRUNC_, 0666);
     if (!IS_ERR(fd)) {
         fd->ops->write(fd, resolvConf.UTF8String, [resolvConf lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);

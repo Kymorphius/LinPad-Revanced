@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,8 +14,8 @@
 #define MAX_LEASE_SECONDS 3600
 #define NS_PER_SEC 1000000000ull
 
-// Private, link-local, CGNAT (Tailscale) and multicast ranges stay direct
-// until the manager says otherwise.
+// Private, link-local, CGNAT (Tailscale) and multicast ranges stay direct,
+// netlock or not, until the manager says otherwise.
 static const char default_bypass[] =
     "0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 "
     "192.168.0.0/16 224.0.0.0/3 ::1/128 fc00::/7 fe80::/10 ff00::/8";
@@ -46,7 +47,9 @@ struct entry {
 static lock_t lock = LOCK_INITIALIZER;
 static struct config config;
 static bool defaults_loaded;
-static uint64_t redirected_total, lookups_total, lookup_misses;
+// Read without the lock on every datagram send.
+static atomic_bool netlock;
+static uint64_t redirected_total, lookups_total, lookup_misses, blocked_total;
 static struct entry *entries;
 static size_t nentries, capentries;
 
@@ -178,28 +181,45 @@ static bool never_redirected(const struct sockaddr_storage *addr) {
     return memcmp(a, any, 16) == 0 || memcmp(a, loop, 16) == 0;
 }
 
-bool sockredirect_target(const struct sockaddr *dst, unsigned euid, uint16_t fixed_port,
+// The caller holds lock.
+static bool is_exempt(unsigned euid) {
+    return config.exempt && euid == config.exempt_uid;
+}
+
+// The caller holds lock.
+static bool is_outside(const struct sockaddr_storage *addr) {
+    if (never_redirected(addr))
+        return false;
+    for (unsigned i = 0; i < config.nbypass; i++)
+        if (cidr_contains(&config.bypass[i], addr))
+            return false;
+    return true;
+}
+
+int sockredirect_tcp(const struct sockaddr *dst, unsigned euid, uint16_t fixed_port,
         struct sockaddr_storage *target, socklen_t *target_len) {
     struct sockaddr_storage d;
     socklen_t dlen;
     if (!normalize(dst, &d, &dlen))
-        return false;
+        return 0;
     uint16_t port = fixed_port;
     if (port == 0) {
         lock(&lock);
         load_defaults();
-        bool redirect = config.tcp_port != 0 && now_ns() < config.lease_until_ns &&
-            !(config.exempt && euid == config.exempt_uid) && !never_redirected(&d);
-        for (unsigned i = 0; redirect && i < config.nbypass; i++)
-            if (cidr_contains(&config.bypass[i], &d))
-                redirect = false;
-        if (redirect) {
-            port = config.tcp_port;
-            redirected_total++;
+        int verdict = 0;
+        if (!is_exempt(euid) && is_outside(&d)) {
+            if (config.tcp_port != 0 && now_ns() < config.lease_until_ns) {
+                port = config.tcp_port;
+                redirected_total++;
+                verdict = 1;
+            } else if (atomic_load(&netlock)) {
+                blocked_total++;
+                verdict = _EPERM;
+            }
         }
         unlock(&lock);
-        if (!redirect)
-            return false;
+        if (verdict != 1)
+            return verdict;
     }
     memset(target, 0, sizeof(*target));
     if (dst->sa_family == AF_INET) {
@@ -229,7 +249,42 @@ bool sockredirect_target(const struct sockaddr *dst, unsigned euid, uint16_t fix
         }
         *target_len = sizeof(*v6);
     }
-    return true;
+    return 1;
+}
+
+bool sockredirect_outside(const struct sockaddr *dst) {
+    struct sockaddr_storage d;
+    socklen_t dlen;
+    if (!normalize(dst, &d, &dlen))
+        return false;
+    lock(&lock);
+    load_defaults();
+    bool outside = is_outside(&d);
+    unlock(&lock);
+    return outside;
+}
+
+int sockredirect_locked(unsigned euid) {
+    if (!atomic_load(&netlock))
+        return 0;
+    lock(&lock);
+    int err = 0;
+    if (!is_exempt(euid)) {
+        blocked_total++;
+        err = _EPERM;
+    }
+    unlock(&lock);
+    return err;
+}
+
+int sockredirect_datagram(const struct sockaddr *dst, unsigned euid) {
+    if (!atomic_load(&netlock) || !sockredirect_outside(dst))
+        return 0;
+    return sockredirect_locked(euid);
+}
+
+void sockredirect_set_netlock(bool on) {
+    atomic_store(&netlock, on);
 }
 
 // The caller holds lock.
@@ -321,6 +376,7 @@ void sockredirect_show(struct proc_data *buf) {
     uint64_t now = now_ns();
     bool active = config.tcp_port != 0 && now < config.lease_until_ns;
     proc_printf(buf, "active %d\n", active);
+    proc_printf(buf, "netlock %d\n", atomic_load(&netlock));
     proc_printf(buf, "tcp_port %u\n", config.tcp_port);
     if (config.exempt)
         proc_printf(buf, "exempt_uid %u\n", config.exempt_uid);
@@ -339,6 +395,7 @@ void sockredirect_show(struct proc_data *buf) {
     proc_printf(buf, "original_dst_lookups %llu\n", (unsigned long long) lookups_total);
     proc_printf(buf, "original_dst_misses %llu\n", (unsigned long long) lookup_misses);
     proc_printf(buf, "open %zu\n", nentries);
+    proc_printf(buf, "blocked %llu\n", (unsigned long long) blocked_total);
     unlock(&lock);
 }
 
@@ -352,6 +409,7 @@ int sockredirect_update(const char *text, size_t size, unsigned euid) {
     load_defaults();
     // All lines apply together or not at all.
     struct config next = config;
+    int next_netlock = -1;
     int err = 0;
     char *save = NULL;
     for (char *line = strtok_r(copy, "\n", &save); line && err == 0; line = strtok_r(NULL, "\n", &save)) {
@@ -370,6 +428,9 @@ int sockredirect_update(const char *text, size_t size, unsigned euid) {
             next.exempt_uid = (unsigned) n;
         } else if (strcmp(line, "lease") == 0 && number && n <= MAX_LEASE_SECONDS) {
             next.lease_until_ns = n ? now_ns() + n * NS_PER_SEC : 0;
+        } else if (strcmp(line, "netlock") == 0 && value != NULL &&
+                (strcmp(value, "on") == 0 || strcmp(value, "off") == 0)) {
+            next_netlock = strcmp(value, "on") == 0;
         } else if (strcmp(line, "bypass") == 0) {
             if (!parse_bypass(value != NULL ? value : "", next.bypass, &next.nbypass))
                 err = _EINVAL;
@@ -377,8 +438,11 @@ int sockredirect_update(const char *text, size_t size, unsigned euid) {
             err = _EINVAL;
         }
     }
-    if (err == 0)
+    if (err == 0) {
         config = next;
+        if (next_netlock != -1)
+            atomic_store(&netlock, next_netlock);
+    }
     unlock(&lock);
     free(copy);
     return err;

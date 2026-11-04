@@ -224,6 +224,9 @@ static inline int sock_flags_from_real(int real) {
 #define SO_REUSEPORT_ 15
 #define SO_PASSCRED_ 16
 #define SO_PEERCRED_ 17
+// getsockopt(SOL_IP or SOL_IPV6, SO_ORIGINAL_DST): netfilter's, answered for
+// transparently redirected connections (fs/sockredirect.h)
+#define SO_ORIGINAL_DST_ 80
 #define SO_TIMESTAMP_ 29
 #define SO_PROTOCOL_ 38
 #define SO_DOMAIN_ 39

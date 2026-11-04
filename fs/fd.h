@@ -78,6 +78,12 @@ struct fd {
             // answers the next connect() that finds it complete with 0, the host with
             // EISCONN; sys_connect gives the Linux answer.
             bool inet_connect_pending;
+            // A TCP connect sent to the transparent proxy (fs/sockredirect.h):
+            // the proxy port, and the local address the proxy sees as its peer,
+            // under which the original destination is kept until close.
+            uint16_t redirect_to_port;
+            uint16_t redirect_local_port;
+            bool redirect_local_v6;
             // credentials of the last message sent to this end, recorded at
             // send time so they survive the sender closing (SCM_CREDENTIALS)
             struct ucred_ unix_recv_cred;

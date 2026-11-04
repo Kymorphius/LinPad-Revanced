@@ -1,6 +1,8 @@
 #include "kernel/oom.h"
 #include "fs/proc.h"
 #include "fs/proc/ish.h"
+#include "fs/sockredirect.h"
+#include "kernel/task.h"
 #include "kernel/errno.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -175,6 +177,15 @@ static int proc_ish_update_oom(struct proc_entry *UNUSED(entry), struct proc_dat
     return oom_update_policy(data->data, data->size);
 }
 
+static int proc_ish_show_transparent_proxy(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
+    sockredirect_show(buf);
+    return 0;
+}
+
+static int proc_ish_update_transparent_proxy(struct proc_entry *UNUSED(entry), struct proc_data *data) {
+    return sockredirect_update(data->data, data->size, current->euid);
+}
+
 struct proc_children proc_ish_children = PROC_CHILDREN({
     {"colors", .show = proc_ish_show_colors},
     {".defaults", S_IFDIR, .readdir = proc_ish_underlying_defaults_readdir},
@@ -182,5 +193,6 @@ struct proc_children proc_ish_children = PROC_CHILDREN({
     {"documents", .show = proc_ish_show_documents},
     {"memory", .show = proc_ish_show_memory},
     {"oom", 0644, .show = proc_ish_show_oom, .update = proc_ish_update_oom},
+    {"transparent_proxy", 0644, .show = proc_ish_show_transparent_proxy, .update = proc_ish_update_transparent_proxy},
     {"version", .show = proc_ish_show_version},
 });

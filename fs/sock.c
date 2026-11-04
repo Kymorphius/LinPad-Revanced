@@ -12,6 +12,7 @@
 #include "fs/real.h"
 #include "fs/netlink.h"
 #include "fs/sock.h"
+#include "fs/sockredirect.h"
 #include "fs/poll.h"
 #include "debug.h"
 
@@ -538,6 +539,31 @@ static bool unix_cred_take(struct fd *sock, bool peek, struct ucred_ *out) {
     return found;
 }
 
+// The host connect() for a guest connect() or fast-open send: while the
+// transparent proxy holds its lease, an outside TCP destination is replaced by
+// the proxy, and the original is kept for its SO_ORIGINAL_DST query.
+static int sock_host_connect(struct fd *sock, struct sockaddr_max_ *sockaddr, socklen_t len) {
+    struct sockaddr_storage target;
+    socklen_t target_len;
+    bool redirect = (sock->socket.domain == AF_INET_ || sock->socket.domain == AF_INET6_) &&
+        sock->socket.type == SOCK_STREAM_ &&
+        sockredirect_target((struct sockaddr *) sockaddr, current->euid, sock->socket.redirect_to_port,
+                &target, &target_len);
+    if (!redirect)
+        return connect(sock->real_fd, (void *) sockaddr, len);
+    int err = connect(sock->real_fd, (struct sockaddr *) &target, target_len);
+    int saved = errno;
+    if ((err == 0 || saved == EINPROGRESS) && sock->socket.redirect_local_port == 0) {
+        sock->socket.redirect_to_port = ntohs(target.ss_family == AF_INET
+                ? ((struct sockaddr_in *) &target)->sin_port
+                : ((struct sockaddr_in6 *) &target)->sin6_port);
+        sock->socket.redirect_local_port = sockredirect_remember(sock->real_fd, (struct sockaddr *) sockaddr,
+                &sock->socket.redirect_local_v6);
+    }
+    errno = saved;
+    return err;
+}
+
 int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
     STRACE("connect(%d, 0x%x, %d)", sock_fd, sockaddr_addr, sockaddr_len);
     struct fd *sock = sock_getfd(sock_fd);
@@ -550,7 +576,7 @@ int_t sys_connect(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
     if (err < 0)
         return err;
 
-    err = connect(sock->real_fd, (void *) &sockaddr, sockaddr_len);
+    err = sock_host_connect(sock, &sockaddr, sockaddr_len);
     if (err < 0 && errno == EISCONN && sock->socket.inet_connect_pending) {
         sock->socket.inet_connect_pending = false;
         return 0;
@@ -806,6 +832,35 @@ int_t sys_getpeername(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_ad
         return 0;
     }
 
+    // A redirected connection's peer is where the program meant to go, not the
+    // transparent proxy; IPv4 ones show IPv4-mapped on an IPv6 socket, as on Linux.
+    struct sockaddr_storage original;
+    socklen_t original_len;
+    if (sock->socket.redirect_local_port != 0 &&
+            sockredirect_lookup(sock->socket.redirect_local_v6, sock->socket.redirect_local_port,
+                &original, &original_len) == 0) {
+        if (sock->socket.domain == AF_INET6_ && original.ss_family == AF_INET) {
+            struct sockaddr_in v4 = *(struct sockaddr_in *) &original;
+            struct sockaddr_in6 *v6 = (struct sockaddr_in6 *) &original;
+            memset(v6, 0, sizeof(*v6));
+#if defined(__APPLE__)
+            v6->sin6_len = sizeof(*v6);
+#endif
+            v6->sin6_family = AF_INET6;
+            v6->sin6_port = v4.sin_port;
+            v6->sin6_addr.s6_addr[10] = v6->sin6_addr.s6_addr[11] = 0xff;
+            memcpy(&v6->sin6_addr.s6_addr[12], &v4.sin_addr, 4);
+            original_len = sizeof(*v6);
+        }
+        uint_t actual = original_len;
+        int err = sockaddr_write(sockaddr_addr, &original, sockaddr_len, &actual);
+        if (err < 0)
+            return err;
+        if (user_put(sockaddr_len_addr, actual))
+            return _EFAULT;
+        return 0;
+    }
+
     // TODO if this is a unix socket, return the same string the peer passed to
     // bind once the peer pointer is available
 
@@ -893,7 +948,7 @@ static bool sock_wants_fastopen(struct fd *sock, dword_t flags, bool has_address
 }
 
 static int sock_fastopen_connect(struct fd *sock, struct sockaddr_max_ *sockaddr, socklen_t len) {
-    if (connect(sock->real_fd, (void *) sockaddr, len) == 0 || errno == EISCONN)
+    if (sock_host_connect(sock, sockaddr, len) == 0 || errno == EISCONN)
         return 0;
     if (errno == EINPROGRESS)
         sock->socket.inet_connect_pending = true;
@@ -1602,7 +1657,20 @@ int_t sys_getsockopt(fd_t sock_fd, dword_t level, dword_t option, addr_t value_a
         return _EFAULT;
 
     int timeo_real;
-    if (sock_timeo_option(level, option, &timeo_real)) {
+    if ((level == IPPROTO_IP || level == IPPROTO_IPV6) && option == SO_ORIGINAL_DST_) {
+        // The transparent proxy asks where a redirected connection was going:
+        // a Linux sockaddr_in for SOL_IP, sockaddr_in6 for SOL_IPV6.
+        struct sockaddr_storage original;
+        socklen_t original_len;
+        int err = sockredirect_original_dst(sock->real_fd, level == IPPROTO_IPV6, &original, &original_len);
+        if (err < 0)
+            return err;
+        if (value_len < original_len)
+            return _EINVAL;
+        ((struct sockaddr_ *) &original)->family = level == IPPROTO_IPV6 ? PF_INET6_ : PF_INET_;
+        memcpy(value, &original, original_len);
+        value_len = original_len;
+    } else if (sock_timeo_option(level, option, &timeo_real)) {
         int err = sock_get_timeo(sock, option, timeo_real, value, &value_len);
         if (err < 0)
             return err;
@@ -2434,6 +2502,8 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
 
 static int sock_close(struct fd *fd) {
     sockrestart_end_listen(fd);
+    if (fd->socket.redirect_local_port != 0)
+        sockredirect_forget(fd->socket.redirect_local_v6, fd->socket.redirect_local_port);
     // FIXME next 3 lines should go in a function like release_unix_names
     inode_release_if_exist(fd->socket.unix_name_inode);
     if (fd->socket.unix_name_abstract != NULL)

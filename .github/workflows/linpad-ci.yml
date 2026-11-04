@@ -189,6 +189,9 @@ jobs:
       - name: Native listener repair regressions
         run: tests/unit/sockrestart-test.sh
 
+      - name: Native transparent proxy redirect regressions
+        run: tests/unit/sockredirect-test.sh
+
       - name: JIT executable-memory probe
         run: tests/unit/jit-probe-test.sh
 

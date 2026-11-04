@@ -216,6 +216,7 @@ if get_option('kernel') == 'ish'
         'fs/sysfs.c',
         'fs/pipe.c',
         'fs/sockrestart.c',
+        'fs/sockredirect.c',
         'fs/lock.c',
 
         'fs/dev.c',

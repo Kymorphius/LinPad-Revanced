@@ -8,6 +8,35 @@ fail() {
     exit 1
 }
 
+# BusyBox init (guest PID 1) reads /etc/inittab at every LinPad launch, with or
+# without the desktop. It runs a "once" entry without waiting; the command has
+# shell redirections, so init passes it to /bin/sh. The helper itself checks
+# /etc/linpad-ssh/autostart and bounds its own runtime.
+boot_entry='::once:/usr/local/bin/linpad-ssh-start --boot </dev/null >/dev/null 2>&1'
+boot_entry_comment='# LinPad SSH: start at every launch (tools/setup_guest_ssh.sh)'
+
+boot_entry_present() {
+    [ -f "$1" ] && grep -Fqx "$boot_entry" "$1"
+}
+
+# Append the entry once, preserving every existing line, mode and ownership.
+install_boot_entry() {
+    if [ ! -f "$1" ] || [ -L "$1" ] || [ "$(stat -c %u "$1")" != 0 ]; then
+        printf '%s\n' "linpad-ssh: $1 is not a root-owned regular file; SSH will not start at launch" >&2
+        return 0
+    fi
+    boot_entry_present "$1" && return 0
+    inittab_mode=$(stat -c %a "$1")
+    inittab_tmp=$(mktemp "$1.linpad-ssh.XXXXXX")
+    cat "$1" > "$inittab_tmp"
+    # Keep a final line without a newline separate from the new entry.
+    [ ! -s "$inittab_tmp" ] || [ -z "$(tail -c 1 "$inittab_tmp")" ] || printf '\n' >> "$inittab_tmp"
+    printf '%s\n%s\n' "$boot_entry_comment" "$boot_entry" >> "$inittab_tmp"
+    chmod "$inittab_mode" "$inittab_tmp"
+    mv "$inittab_tmp" "$1"
+    inittab_tmp=''
+}
+
 main() {
     [ "$(id -u)" = 0 ] || fail 'run this script as guest root'
     public_key=''
@@ -23,6 +52,13 @@ main() {
             [ "$(sed -n '1p' "$helper")" = '#!/bin/sh' ] &&
             [ "$(sed -n '2p' "$helper")" = '# LinPad SSH helper' ] ||
             fail "refusing to overwrite an unrecognized $helper"
+    fi
+    switch=/usr/local/bin/linpad-ssh-autostart
+    if [ -e "$switch" ] || [ -L "$switch" ]; then
+        [ -f "$switch" ] && [ ! -L "$switch" ] &&
+            [ "$(sed -n '1p' "$switch")" = '#!/bin/sh' ] &&
+            [ "$(sed -n '2p' "$switch")" = '# LinPad SSH autostart switch' ] ||
+            fail "refusing to overwrite an unrecognized $switch"
     fi
 
     resume_dir=/etc/linpad/lifecycle.d
@@ -46,6 +82,23 @@ main() {
         fi
     }
     check_resume_destination
+
+    # Earlier installs started SSH from the desktop session only. BusyBox init
+    # now starts it at every LinPad launch; remove only that recognized hook.
+    legacy_session_hook=/etc/ishwl/session.d/60-linpad-ssh.sh
+    if [ -e "$legacy_session_hook" ] || [ -L "$legacy_session_hook" ]; then
+        [ -f "$legacy_session_hook" ] && [ ! -L "$legacy_session_hook" ] &&
+            [ "$(stat -c %u "$legacy_session_hook")" = 0 ] &&
+            [ "$(sed -n '2p' "$legacy_session_hook")" = '# LinPad SSH boot hook' ] ||
+            fail "refusing to remove an unrecognized $legacy_session_hook"
+    fi
+    inittab=/etc/inittab
+    autostart_flag=/etc/linpad-ssh/autostart
+    # First installation enables autostart. Reruns keep the user's choice.
+    enable_autostart=0
+    if [ ! -e "$legacy_session_hook" ] && ! boot_entry_present "$inittab"; then
+        enable_autostart=1
+    fi
 
     if ! command -v dropbear >/dev/null 2>&1 || ! command -v dropbearkey >/dev/null 2>&1; then
         apk add --no-cache dropbear
@@ -76,11 +129,14 @@ main() {
     helper_tmp=$(mktemp /usr/local/bin/.linpad-ssh-start.XXXXXX)
     public_tmp=''
     resume_tmp=''
-    trap 'rm -f "$helper_tmp"; [ -z "$public_tmp" ] || rm -f "$public_tmp"; [ -z "$resume_tmp" ] || rm -f "$resume_tmp"' 0
+    inittab_tmp=''
+    switch_tmp=''
+    trap 'rm -f "$helper_tmp"; [ -z "$public_tmp" ] || rm -f "$public_tmp"; [ -z "$resume_tmp" ] || rm -f "$resume_tmp"; [ -z "$inittab_tmp" ] || rm -f "$inittab_tmp"; [ -z "$switch_tmp" ] || rm -f "$switch_tmp"' 0
     cat > "$helper_tmp" <<'HELPER'
 #!/bin/sh
 # LinPad SSH helper
-# Key-only IPv4 SSH for USB forwarding and Wi-Fi. No shell/profile autostart.
+# Key-only IPv4 SSH for USB forwarding and Wi-Fi. No shell/profile autostart;
+# BusyBox init may run --boot once per LinPad launch (/etc/inittab).
 set -eu
 set -f
 umask 077
@@ -101,12 +157,33 @@ if [ "${1-}" != --bounded-run ]; then
 fi
 shift
 recover_only=0
+boot=0
 case "$#:${1-}" in
     0:) ;;
     1:--recover-existing) recover_only=1 ;;
-    *) fail 'usage: linpad-ssh-start [--recover-existing]' ;;
+    1:--boot) boot=1 ;;
+    *) fail 'usage: linpad-ssh-start [--recover-existing | --boot]' ;;
 esac
 [ "$(id -u)" = 0 ] || fail 'run as guest root'
+# --boot follows LinPad's preference (iPad Settings > LinPad > Start SSH at
+# Launch), which Linux sees as /proc/ish/defaults/ssh_autostart. Apps without
+# that preference fall back to this root-owned marker.
+autostart_flag=/etc/linpad-ssh/autostart
+autostart_pref=$proc_root/ish/defaults/ssh_autostart
+if [ "$boot" = 1 ]; then
+    autostart=''
+    if [ -r "$autostart_pref" ]; then
+        value=$(tr -d ' \t\r\n' < "$autostart_pref" 2>/dev/null) || value=''
+        case "$value" in true|1) autostart=on ;; false|0) autostart=off ;; esac
+    fi
+    if [ -z "$autostart" ]; then
+        if [ -f "$autostart_flag" ]; then autostart=on; else autostart=off; fi
+    fi
+    if [ "$autostart" = off ]; then
+        printf '%s\n' 'LinPad SSH autostart is off; left unchanged'
+        exit 0
+    fi
+fi
 
 valid_pid() {
     case "$1" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
@@ -163,6 +240,26 @@ master_matches() {
     done < "$proc_root/$expected_pid/status"
     [ "$seen_name:$seen_pid:$seen_tgid:$seen_ppid:$seen_uid" = 1:1:1:1:1 ]
 }
+# /run is not cleared when iPadOS ends LinPad. The current launch began when
+# guest PID 1 started; boot ticks share /proc/stat's btime base. A runtime file
+# modified before then belongs to a previous launch whose processes are gone.
+session_start=''
+read_session_start() {
+    boot_time=''
+    [ -r "$proc_root/stat" ] || return 1
+    while read -r key value _extra; do
+        [ "$key" = btime ] && { boot_time=$value; break; }
+    done < "$proc_root/stat"
+    valid_tick "$boot_time" && read_start 1 || return 1
+    session_start=$((boot_time + proc_start / 100))
+}
+predates_session() {
+    [ -n "$session_start" ] || return 1
+    mtime=$("$timeout" 2 stat -c %Y "$1" 2>/dev/null) || return 1
+    valid_tick "$mtime" || return 1
+    # Two seconds absorb btime/tick rounding; closer files are kept as current.
+    [ "$mtime" -lt $((session_start - 2)) ]
+}
 has_banner() {
     # /dev/null stdin makes BusyBox nc exit before reading a healthy banner.
     "$timeout" 4 /bin/sh -c 'sleep 3 | "$1" -w 2 127.0.0.1 2222' sh "$nc" 2>/dev/null |
@@ -180,8 +277,23 @@ mkdir -p "$state_dir"
 chmod 700 "$state_dir"
 [ ! -L "$pid_file" ] && [ ! -L "$log_file" ] || fail 'refusing symlinked runtime files'
 
-# A lock is never stolen or cleaned as stale. Unknown ownership fails closed.
+# A lock is never stolen from the current launch. Unknown ownership fails
+# closed; only a lock proven to predate this launch is discarded.
 lock_dir=$state_dir/start.lock
+if read_session_start; then
+    if [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] && [ ! -L "$lock_dir/owner" ] &&
+        [ "$("$timeout" 2 stat -c %u "$lock_dir" 2>/dev/null)" = 0 ] &&
+        predates_session "$lock_dir"; then
+        rm -f "$lock_dir/owner"
+        rmdir "$lock_dir" 2>/dev/null || :
+        printf '%s\n' 'Removed start.lock left by a previous LinPad launch'
+    fi
+    # Its PID may now name an unrelated process; never signal it, just forget it.
+    if [ -f "$pid_file" ] && predates_session "$pid_file"; then
+        rm -f "$pid_file"
+        printf '%s\n' 'Removed PID file left by a previous LinPad launch'
+    fi
+fi
 mkdir "$lock_dir" 2>/dev/null || fail 'another SSH operation or an unknown start.lock exists; left unchanged'
 self_pid=$$
 if ! read_start "$self_pid"; then
@@ -303,6 +415,76 @@ exit 0
 RESUME_HOOK
     chmod 755 "$resume_tmp"
     mv "$resume_tmp" "$resume_hook"
+
+    install_boot_entry "$inittab"
+    [ ! -e "$legacy_session_hook" ] || rm -f "$legacy_session_hook"
+    if [ "$enable_autostart" = 1 ]; then
+        [ ! -L "$autostart_flag" ] || fail 'autostart marker must not be a symlink'
+        : > "$autostart_flag"
+        chmod 600 "$autostart_flag"
+    fi
+
+    switch_tmp=$(mktemp /usr/local/bin/.linpad-ssh-autostart.XXXXXX)
+    cat > "$switch_tmp" <<'AUTOSTART_SWITCH'
+#!/bin/sh
+# LinPad SSH autostart switch
+# Whether SSH starts at every LinPad launch. BusyBox init runs
+# "linpad-ssh-start --boot" from /etc/inittab, which follows LinPad's
+# preference (iPad Settings > LinPad > Start SSH at Launch, also in the desktop
+# Settings), seen here as /proc/ish/defaults/ssh_autostart. This command changes
+# that preference and mirrors it in a marker file for apps without it.
+# Output is one word, "on" or "off", for scripts.
+set -eu
+umask 077
+flag=/etc/linpad-ssh/autostart
+pref=/proc/ish/defaults/ssh_autostart
+inittab=/etc/inittab
+entry='::once:/usr/local/bin/linpad-ssh-start --boot </dev/null >/dev/null 2>&1'
+
+fail() { printf '%s\n' "linpad-ssh-autostart: $*" >&2; exit 1; }
+pref_state() {
+    [ -r "$pref" ] || return 0
+    value=$(tr -d ' \t\r\n' < "$pref" 2>/dev/null) || return 0
+    case "$value" in true|1) printf '%s\n' on ;; false|0) printf '%s\n' off ;; esac
+}
+status() {
+    [ ! -L "$flag" ] || fail "$flag must not be a symlink"
+    state=$(pref_state)
+    if [ -z "$state" ]; then
+        if [ -f "$flag" ]; then state=on; else state=off; fi
+    fi
+    printf '%s\n' "$state"
+    if [ "$state" = on ] && ! grep -Fqx "$entry" "$inittab" 2>/dev/null; then
+        printf '%s\n' "linpad-ssh-autostart: $inittab has no boot entry; rerun tools/setup_guest_ssh.sh" >&2
+    fi
+}
+set_pref() {
+    [ -e "$pref" ] || return 0
+    printf '%s\n' "$1" > "$pref" 2>/dev/null || fail "cannot change LinPad's SSH preference ($pref)"
+}
+
+case "$#:${1-}" in
+    0: | 1:status) status ;;
+    1:on)
+        [ "$(id -u)" = 0 ] || fail 'run as guest root'
+        [ ! -L "$flag" ] || fail "$flag must not be a symlink"
+        [ -d "${flag%/*}" ] || fail "${flag%/*} is missing; rerun tools/setup_guest_ssh.sh"
+        set_pref true
+        : > "$flag"
+        chmod 600 "$flag"
+        status ;;
+    1:off)
+        [ "$(id -u)" = 0 ] || fail 'run as guest root'
+        [ ! -L "$flag" ] || fail "$flag must not be a symlink"
+        set_pref false
+        rm -f "$flag"
+        status ;;
+    *) printf '%s\n' 'usage: linpad-ssh-autostart [on | off | status]' >&2; exit 2 ;;
+esac
+AUTOSTART_SWITCH
+    chmod 755 "$switch_tmp"
+    mv "$switch_tmp" "$switch"
+    switch_tmp=''
 
     public_tmp=$(mktemp /tmp/.linpad-ssh-hostkey.XXXXXX)
     dropbearkey -y -f "$host_key" | awk '

@@ -518,7 +518,7 @@ int_t sys_listen(fd_t sock_fd, int_t backlog) {
     int err = listen(sock->real_fd, backlog);
     if (err < 0)
         return errno_map();
-    sockrestart_begin_listen(sock);
+    sockrestart_begin_listen(sock, backlog);
     return err;
 }
 
@@ -534,17 +534,33 @@ int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
     }
 
     char sockaddr[sockaddr_len];
+    dword_t sockaddr_cap = sockaddr_len;
     int client;
+    int accept_errno;
+    bool repaired = false;
+retry:
     do {
         sockrestart_begin_listen_wait(sock);
         errno = 0;
+        sockaddr_len = sockaddr_cap;
         client = accept(sock->real_fd,
                 sockaddr_addr != 0 ? (void *) sockaddr : NULL,
                 sockaddr_addr != 0 ? &sockaddr_len : NULL);
+        accept_errno = errno;
         sockrestart_end_listen_wait(sock);
-    } while (sockrestart_should_restart_listen_wait() && errno == EINTR);
-    if (client < 0)
+        // A listener rebuilt under a blocked accept fails it with EINTR or with
+        // the error of the closed descriptor; either way, wait again.
+    } while (client < 0 && sockrestart_should_restart_listen_wait());
+    if (client < 0) {
+        // A listener reclaimed during suspension fails at once forever; rebuild
+        // it in place and try once more (sockrestart.h).
+        if (!repaired && sockrestart_repair_after_accept_error(sock, accept_errno)) {
+            repaired = true;
+            goto retry;
+        }
+        errno = accept_errno;
         return errno_map();
+    }
 
     if (sockaddr_addr != 0) {
         int err = sockaddr_write(sockaddr_addr, sockaddr, sizeof(sockaddr), &sockaddr_len);

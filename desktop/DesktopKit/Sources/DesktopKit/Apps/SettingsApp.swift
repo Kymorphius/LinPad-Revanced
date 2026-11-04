@@ -194,6 +194,7 @@ struct SettingsAppView: View {
                                 .id(SettingsApp.idlePage)
                             LifecycleSettingsSection(controller: desktopController, host: host)
                                 .id(SettingsApp.backgroundPage)
+                            SSHSettingsSection()
                             tilingSection
                             shortcutsSection
                                 .id(SettingsApp.shortcutsPage)

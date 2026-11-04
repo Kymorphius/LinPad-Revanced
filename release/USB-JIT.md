@@ -6,6 +6,23 @@ modify the IPA or require an additional debugging app on the iPad. See
 [jit/DESIGN.md](../jit/DESIGN.md#10-executable-memory-on-ios-txm-and-macos) for
 the protocol design.
 
+## One step
+
+```sh
+tools/linpad_enable_jit.sh
+```
+
+The script finds the running LinPad process and drives the manual steps below
+through LLDB: attach, wait for a real stop, run
+`linpad-jit --retry --timeout 300`, and quit once LinPad asks to detach,
+checking the output at each step. A locked iPad or a failed attach is reported
+at once and LLDB is closed, since nothing is attached yet. Once attached, an
+unfinished protocol leaves LLDB attached and stopped, as required below, and the
+script prints the commands to inspect or end that session. JIT lasts only for
+the current LinPad process, so run it after every launch, including the first
+launch after re-signing. On the iPad itself, StikDebug can do the same; see
+[STIKDEBUG.md](STIKDEBUG.md).
+
 ## Attach and enable JIT
 
 Use a Mac with Xcode installed and selected. The iPad must have Developer Mode

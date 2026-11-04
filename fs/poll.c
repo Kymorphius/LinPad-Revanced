@@ -231,6 +231,21 @@ void poll_cleanup_fd(struct fd *fd) {
     unlock(&fd->poll_lock);
 }
 
+// The host descriptor behind fd was replaced in place (dup2), which dropped
+// its host readiness registrations; register it again in every set it is in.
+void poll_rearm_fd(struct fd *fd) {
+    lock(&fd->poll_lock);
+    struct poll_fd *poll_fd;
+    list_for_each_entry(&fd->poll_fds, poll_fd, polls) {
+        lock(&poll_fd->poll->lock);
+        if (poll_fd_is_real(poll_fd))
+            real_poll_update(&poll_fd->poll->real, fd->real_fd,
+                    poll_fd_real_types(poll_fd, poll_fd->types), poll_fd);
+        unlock(&poll_fd->poll->lock);
+    }
+    unlock(&fd->poll_lock);
+}
+
 // Take a reference unless the fd is already being closed (refcount 0).
 static bool fd_try_retain(struct fd *fd) {
     unsigned count = atomic_load(&fd->refcount);

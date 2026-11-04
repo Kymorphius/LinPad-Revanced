@@ -38,6 +38,24 @@
 		</dict>
 		<dict>
 			<key>FooterText</key>
+			<string>Starts the SSH server installed by setup_guest_ssh.sh each time LinPad starts, with or without the desktop. Takes effect at the next launch. In Linux the same switch is linpad-ssh-autostart on, off or status.</string>
+			<key>Title</key>
+			<string>SSH</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<true/>
+			<key>Key</key>
+			<string>ssh.autostart</string>
+			<key>Title</key>
+			<string>Start SSH at Launch</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>FooterText</key>
 			<string>For when the desktop is not usable. Repair puts back the system files that ship with the app and keeps all your data; it runs once the desktop has started. A reset reinstalls the Linux system at the next launch: Keep My Files keeps /root and /home, Erase Everything deletes them. A reset runs only with RESET typed below; both fields clear themselves at the next launch.</string>
 			<key>Title</key>
 			<string>Maintenance</string>

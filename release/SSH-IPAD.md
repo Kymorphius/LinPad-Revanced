@@ -69,8 +69,22 @@ Pass a remote command after the transport argument:
 
 ## Start and verify the service
 
-SSH is started on demand. After LinPad is terminated or restarted, run this in
-the guest terminal before reconnecting:
+After LinPad is terminated or restarted, SSH starts with Linux, with or
+without the desktop. Setup appends one `::once:` entry to `/etc/inittab`, and
+BusyBox init runs `linpad-ssh-start --boot` in the background at every launch
+without waiting for it. Existing inittab lines and mode are kept, reruns add no
+second entry, and an earlier desktop-session hook,
+`/etc/ishwl/session.d/60-linpad-ssh.sh`, is removed. The guest's `/run`
+survives relaunches; the helper discards only a `start.lock` or PID file older
+than the current guest PID 1 and never signals the PID recorded in it.
+
+The switch is LinPad's preference **Start SSH at Launch**: iPad Settings ›
+LinPad › SSH, and Settings › SSH in the desktop. It is on by default and takes
+effect at the next launch. Linux sees it as `/proc/ish/defaults/ssh_autostart`;
+`linpad-ssh-autostart off`, `on` and `status` change or print it (one word,
+`on` or `off`) and also write the `/etc/linpad-ssh/autostart` marker used by
+older app builds. Rerunning setup keeps the choice. With autostart off, start
+SSH from the guest terminal:
 
 ```sh
 linpad-ssh-start
@@ -90,7 +104,8 @@ The setup script also installs `/etc/linpad/lifecycle.d/50-linpad-ssh`. On the
 desktop's `resume` event it launches one bounded health check and returns
 immediately. There is no periodic background watcher. The hook invokes
 `linpad-ssh-start --recover-existing`, which leaves SSH off when its managed
-master is absent or already dead.
+master is absent or already dead. Starting SSH at launch is the separate
+boot entry described above.
 
 The starter checks a real local SSH protocol banner before reporting an
 existing server healthy. After two bounded failures it can send one TERM to

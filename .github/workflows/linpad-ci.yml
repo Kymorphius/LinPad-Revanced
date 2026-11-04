@@ -79,14 +79,16 @@ jobs:
           from pathlib import Path
 
           source = Path("tools/setup_guest_ssh.sh").read_text()
-          for label, variable in (("HELPER", "helper_tmp"), ("RESUME_HOOK", "resume_tmp")):
+          for label, variable in (("HELPER", "helper_tmp"), ("RESUME_HOOK", "resume_tmp"),
+                                  ("AUTOSTART_SWITCH", "switch_tmp")):
               marker = f"    cat > \"${variable}\" <<'{label}'\n"
               assert source.count(marker) == 1, label
               script = source.split(marker, 1)[1].split(f"\n{label}\n", 1)[0] + "\n"
               (Path(os.environ["RUNNER_TEMP"]) / f"linpad-ssh-{label.lower()}.sh").write_text(script)
           EOF
           shellcheck --severity=warning --format=gcc tools/setup_guest_ssh.sh \
-            "$RUNNER_TEMP/linpad-ssh-helper.sh" "$RUNNER_TEMP/linpad-ssh-resume_hook.sh"
+            "$RUNNER_TEMP/linpad-ssh-helper.sh" "$RUNNER_TEMP/linpad-ssh-resume_hook.sh" \
+            "$RUNNER_TEMP/linpad-ssh-autostart_switch.sh"
 
       - name: Validate catalog.json and themes.json
         run: |
@@ -183,6 +185,9 @@ jobs:
 
       - name: Native poll readiness regressions
         run: tests/unit/poll-test.sh
+
+      - name: Native listener repair regressions
+        run: tests/unit/sockrestart-test.sh
 
       - name: Terminal keyboard geometry regressions
         run: tests/unit/terminal-keyboard-test.sh

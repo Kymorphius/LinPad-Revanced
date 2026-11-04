@@ -29,6 +29,9 @@ static NSString *const kPreferenceColorSchemeKey = @"Color Scheme";
 // This key has a different naming scheme because it's used in UI tests as a
 // CLI argument.
 NSString *const kHostnameOverrideKey = @"hostnameOverride";
+// iPad Settings › SSH and desktop Settings; Linux reads it at boot as
+// /proc/ish/defaults/ssh_autostart (tools/setup_guest_ssh.sh, linpad-ssh-start --boot).
+static NSString *const kPreferenceSSHAutostartKey = @"ssh.autostart";
 
 NSDictionary<NSString *, NSString *> *friendlyPreferenceMapping;
 NSDictionary<NSString *, NSString *> *friendlyPreferenceReverseMapping;
@@ -168,6 +171,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceColorSchemeKey: @(ColorSchemeMatchSystem),
             kPreferenceThemeKey: @"Default",
             kHostnameOverrideKey: UIDevice.currentDevice.name,
+            kPreferenceSSHAutostartKey: @YES,
         }];
         // https://webkit.org/blog/10247/new-webkit-features-in-safari-13-1/
         if (@available(iOS 13.4, *)) {
@@ -202,6 +206,7 @@ bool (*remove_user_default)(const char *name);
             @"color_scheme": kPreferenceColorSchemeKey,
             @"theme": kPreferenceThemeKey,
             @"hostname_override": kHostnameOverrideKey,
+            @"ssh_autostart": kPreferenceSSHAutostartKey,
         };
         NSMutableDictionary <NSString *, NSString *> *reverseMapping = [NSMutableDictionary new];
         for (NSString *key in friendlyPreferenceMapping) {

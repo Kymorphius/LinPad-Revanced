@@ -97,5 +97,7 @@ int epoll_fd_poll(struct fd *fd);
 
 // for fd_close
 void poll_cleanup_fd(struct fd *fd);
+// Re-register fd's host descriptor after it was replaced in place.
+void poll_rearm_fd(struct fd *fd);
 
 #endif

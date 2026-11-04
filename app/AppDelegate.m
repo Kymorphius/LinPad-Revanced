@@ -288,6 +288,45 @@ static BOOL FastModeAutomatic(void) {
     return setting == nil || ![setting isEqualToString:@"off"];
 }
 
+// A fast mode that cannot work (the helper never attached, so the JIT's code cache is not
+// executable) kills the app within seconds of starting, on every launch, and the setting that would
+// switch it off is out of reach. A launch that ends in the foreground before the app has run for a
+// while counts as a quick crash; after two in a row fast mode is turned off, so the app starts and
+// the setting can be put right.
+static NSString *const kLaunchUnsettledKey = @"launch.unsettled";
+static NSString *const kQuickCrashesKey = @"launch.quickCrashes";
+static const NSTimeInterval kLaunchSettleSeconds = 30;
+static const NSInteger kQuickCrashLimit = 2;
+
+static void SettleLaunch(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setBool:NO forKey:kLaunchUnsettledKey];
+    [defaults setInteger:0 forKey:kQuickCrashesKey];
+}
+
+static void NoteLaunchForCrashLoops(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults boolForKey:kLaunchUnsettledKey]) {
+        NSInteger crashes = [defaults integerForKey:kQuickCrashesKey] + 1;
+        [defaults setInteger:crashes forKey:kQuickCrashesKey];
+        if (crashes >= kQuickCrashLimit && FastModeAutomatic()) {
+            [defaults setObject:@"off" forKey:ISHFastModeSettingKey];
+            [defaults setInteger:0 forKey:kQuickCrashesKey];
+            SetFastModeState(ISHFastModeStateFailed,
+                @"Fast mode was turned off because LinPad stopped unexpectedly right after starting, twice in a row. Turn it back on in Settings › Fast Mode once the helper app works.");
+        }
+    }
+    [defaults setBool:YES forKey:kLaunchUnsettledKey];
+    [defaults synchronize]; // the marker has to be on disk before a crash
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kLaunchSettleSeconds * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ SettleLaunch(); });
+    // leaving the app (home, the app switcher, a swipe away) is not a crash
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification
+                                                    object:nil queue:nil usingBlock:^(NSNotification *note) {
+        SettleLaunch();
+    }];
+}
+
 // get-task-allow is what lets StikDebug attach at all (development-signed installs).
 static BOOL HasGetTaskAllow(void) {
     static BOOL result;
@@ -1012,6 +1051,8 @@ void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    NoteLaunchForCrashLoops();
+
     // get the network permissions popup to appear on chinese devices
     [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:@"http://captive.apple.com"]] resume];
 

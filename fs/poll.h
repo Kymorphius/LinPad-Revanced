@@ -49,6 +49,10 @@ struct poll_fd {
     // returned its bits are set here, and those bits are ignored on the next
     // call to poll_wait. The bits are cleared by poll_wakeup.
     int triggered_types;
+    // EPOLLONESHOT: set once the event has been returned. The entry stays
+    // registered (EPOLL_CTL_ADD still says EEXIST) but reports nothing until
+    // EPOLL_CTL_MOD re-arms it.
+    bool disarmed;
 
     // locked by containing struct fd
     struct poll *poll;

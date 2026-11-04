@@ -118,5 +118,9 @@
 
 int err_map(int err);
 int errno_map(void);
+// While set on the calling thread, errno_map turns EPIPE into an error return only, without
+// SIGPIPE: send(MSG_NOSIGNAL) and friends.
+#include <stdbool.h>
+extern _Thread_local bool errno_suppress_sigpipe;
 
 #endif

@@ -64,7 +64,7 @@ int_t sys_munmap(addr_t addr, addr_t len);
 struct fd;
 addr_t mmap_file(addr_t addr, uint64_t len, dword_t prot, dword_t flags, struct fd *file);
 int_t sys_mprotect(addr_t addr, addr_t len, int_t prot);
-addr_t sys_mremap(addr_t addr, dword_t old_len, dword_t new_len, dword_t flags);
+addr_t sys_mremap(addr_t addr, addr_t old_len, addr_t new_len, dword_t flags);
 dword_t sys_madvise(addr_t addr, dword_t len, dword_t advice);
 dword_t sys_mbind(addr_t addr, dword_t len, int_t mode, addr_t nodemask, dword_t maxnode, uint_t flags);
 int_t sys_mlock(addr_t addr, dword_t len);
@@ -97,15 +97,17 @@ struct iovec64_ {
     uint64_t len;
 };
 #endif
-dword_t sys_read(fd_t fd_no, addr_t buf_addr, dword_t size);
+// A single read/write transfers at most this much, as on Linux (MAX_RW_COUNT).
+#define MAX_RW_COUNT 0x7ffff000
+dword_t sys_read(fd_t fd_no, addr_t buf_addr, addr_t size);
 dword_t sys_readv(fd_t fd_no, addr_t iovec_addr, dword_t iovec_count);
-dword_t sys_write(fd_t fd_no, addr_t buf_addr, dword_t size);
+dword_t sys_write(fd_t fd_no, addr_t buf_addr, addr_t size);
 dword_t sys_writev(fd_t fd_no, addr_t iovec_addr, dword_t iovec_count);
 dword_t sys__llseek(fd_t f, dword_t off_high, dword_t off_low, addr_t res_addr, dword_t whence);
 dword_t sys_lseek(fd_t f, dword_t off, dword_t whence);
 qword_t sys_lseek64(fd_t f, sqword_t off, dword_t whence);
-dword_t sys_pread(fd_t f, addr_t buf_addr, dword_t buf_size, off_t_ off);
-dword_t sys_pwrite(fd_t f, addr_t buf_addr, dword_t size, off_t_ off);
+dword_t sys_pread(fd_t f, addr_t buf_addr, addr_t buf_size, off_t_ off);
+dword_t sys_pwrite(fd_t f, addr_t buf_addr, addr_t size, off_t_ off);
 dword_t sys_preadv(fd_t fd_no, addr_t iovec_addr, dword_t iovec_count,
                    dword_t pos_l, dword_t pos_h);
 dword_t sys_pwritev(fd_t fd_no, addr_t iovec_addr, dword_t iovec_count,
@@ -197,10 +199,10 @@ dword_t sys_utime(addr_t path_addr, addr_t times_addr);
 dword_t sys_times( addr_t tbuf);
 dword_t sys_umask(dword_t mask);
 
-dword_t sys_sendfile(fd_t out_fd, fd_t in_fd, addr_t offset_addr, dword_t count);
-dword_t sys_sendfile64(fd_t out_fd, fd_t in_fd, addr_t offset_addr, dword_t count);
-dword_t sys_splice(fd_t in_fd, addr_t in_off_addr, fd_t out_fd, addr_t out_off_addr, dword_t count, dword_t flags);
-dword_t sys_copy_file_range(fd_t in_fd, addr_t in_off, fd_t out_fd, addr_t out_off, dword_t len, uint_t flags);
+dword_t sys_sendfile(fd_t out_fd, fd_t in_fd, addr_t offset_addr, addr_t count);
+dword_t sys_sendfile64(fd_t out_fd, fd_t in_fd, addr_t offset_addr, addr_t count);
+dword_t sys_splice(fd_t in_fd, addr_t in_off_addr, fd_t out_fd, addr_t out_off_addr, addr_t count, dword_t flags);
+dword_t sys_copy_file_range(fd_t in_fd, addr_t in_off, fd_t out_fd, addr_t out_off, addr_t len, uint_t flags);
 
 dword_t sys_statfs(addr_t path_addr, addr_t buf_addr);
 dword_t sys_statfs64(addr_t path_addr, dword_t buf_size, addr_t buf_addr);

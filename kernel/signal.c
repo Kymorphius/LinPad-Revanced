@@ -54,56 +54,255 @@ static int signal_action(struct sighand *sighand, int sig) {
     }
 }
 
-static void deliver_signal_unlocked(struct task *task, int sig, struct siginfo_ info) {
-    if (sigset_has(task->pending, sig))
-        return;
+// ---- RLIMIT_SIGPENDING accounting ---------------------------------------------------
+// Queued signal details are charged to the target's user, so one user cannot queue without bound.
 
-    sigset_add(&task->pending, sig);
+struct sigpending_user {
+    struct sigpending_user *next;
+    uid_t_ uid;
+    uint64_t count;
+};
+static lock_t sigpending_lock = LOCK_INITIALIZER;
+static struct sigpending_user *sigpending_users;
+
+static bool sigpending_charge(uid_t_ uid, uint64_t limit) {
+    bool charged = false;
+    lock(&sigpending_lock);
+    struct sigpending_user *user = sigpending_users;
+    while (user != NULL && user->uid != uid)
+        user = user->next;
+    if (user == NULL) {
+        user = calloc(1, sizeof(*user));
+        if (user != NULL) {
+            user->uid = uid;
+            user->next = sigpending_users;
+            sigpending_users = user;
+        }
+    }
+    if (user != NULL && user->count < limit) {
+        user->count++;
+        charged = true;
+    }
+    unlock(&sigpending_lock);
+    return charged;
+}
+
+static void sigpending_uncharge(uid_t_ uid) {
+    lock(&sigpending_lock);
+    for (struct sigpending_user *user = sigpending_users; user != NULL; user = user->next) {
+        if (user->uid == uid) {
+            if (user->count > 0)
+                user->count--;
+            break;
+        }
+    }
+    unlock(&sigpending_lock);
+}
+
+void sigqueue_free(struct sigqueue *sigqueue) {
+    if (sigqueue->charged)
+        sigpending_uncharge(sigqueue->charged_uid);
+    free(sigqueue);
+}
+
+// Signals the kernel itself raises, and kill(), never fail for lack of room; sigqueue() and tgkill() do.
+static bool signal_overrides_rlimit(const struct siginfo_ *info) {
+    return info->code >= 0 || info->code == SI_TIMER_;
+}
+
+// ---- Queues -----------------------------------------------------------------------------
+// A thread has a queue of its own for signals sent to it, and shares one with the rest of its
+// process for signals sent to the process. Standard signals coalesce within a queue; each
+// instance of a real-time signal is kept, with its siginfo.
+
+// Queue `sig` on task's own queue, or on its process's when `shared`. Sighand lock held.
+// *queued says whether an entry was added (a standard signal that is already pending is not).
+static int enqueue_signal(struct task *task, int sig, struct siginfo_ info, bool shared, bool *queued) {
+    sigset_t_ *pending = shared ? &task->group->shared_pending : &task->pending;
+    struct list *queue = shared ? &task->group->shared_queue : &task->queue;
+    *queued = false;
+    // A timer has at most one signal pending; further expirations count as overruns of it.
+    if (info.code == SI_TIMER_ && sigset_has(*pending, sig)) {
+        struct sigqueue *entry;
+        list_for_each_entry(queue, entry, queue) {
+            if (entry->info.sig == sig && entry->info.code == SI_TIMER_ &&
+                    entry->info.timer.timer == info.timer.timer) {
+                int_t overrun = entry->info.timer.overrun;
+                if (overrun < INT32_MAX - 1 - info.timer.overrun)
+                    entry->info.timer.overrun = overrun + 1 + info.timer.overrun;
+                else
+                    entry->info.timer.overrun = INT32_MAX;
+                return 0;
+            }
+        }
+    }
+    if (sig < SIGRTMIN_ && sigset_has(*pending, sig))
+        return 0;
+
     struct sigqueue *sigqueue = malloc(sizeof(struct sigqueue));
+    if (sigqueue == NULL)
+        return _EAGAIN;
+    sigqueue->charged = false;
+    if (!signal_overrides_rlimit(&info)) {
+        uid_t_ uid = task->uid;
+        if (sigpending_charge(uid, task->group->limits[RLIMIT_SIGPENDING_].cur)) {
+            sigqueue->charged = true;
+            sigqueue->charged_uid = uid;
+        } else if (sig >= SIGRTMIN_ && info.code != SI_USER_) {
+            free(sigqueue);
+            return _EAGAIN;
+        } else {
+            // the signal still arrives; only its details are lost
+            info = (struct siginfo_) {.code = SI_USER_};
+        }
+    }
     sigqueue->info = info;
     sigqueue->info.sig = sig;
-    list_add_tail(&task->queue, &sigqueue->queue);
+    list_add_tail(queue, &sigqueue->queue);
+    sigset_add(pending, sig);
+    *queued = true;
+    return 0;
+}
 
-    if (sigset_has(task->blocked & ~task->waiting, sig) && signal_is_blockable(sig))
-        return;
-
-    if (task != current) {
-        pthread_kill(task->thread, SIGUSR1);
-
-        // wake up any pthread condition waiters
-        // actual madness, I hope to god it's correct
-        // must release the sighand lock while going insane, to avoid a deadlock
-        unlock(&task->sighand->lock);
-        // Wake up the target thread's condvar wait.
-        // We don't acquire waiting_lock (the associated mutex) because:
-        // 1. It may be held by the target thread inside pthread_cond_wait,
-        //    and spinning on it blocks the condvar from returning.
-        // 2. pthread_cond_broadcast() is safe without the mutex — worst case
-        //    is a spurious wakeup, which wait_for() handles via re-checking.
-        lock(&task->waiting_cond_lock);
-        if (task->waiting_cond != NULL)
-            notify(task->waiting_cond);
-        unlock(&task->waiting_cond_lock);
-        lock(&task->sighand->lock);
+static struct sigqueue *dequeue_from(struct list *queue, sigset_t_ *pending, sigset_t_ mask) {
+    sigset_t_ available = *pending & mask;
+    if (available == 0)
+        return NULL;
+    int sig = __builtin_ctzll(available) + 1; // lowest number first
+    struct sigqueue *found = NULL, *sigqueue;
+    bool more = false;
+    list_for_each_entry(queue, sigqueue, queue) {
+        if (sigqueue->info.sig != sig)
+            continue;
+        if (found == NULL) {
+            found = sigqueue;
+        } else {
+            more = true;
+            break;
+        }
     }
+    if (found == NULL) {
+        sigset_del(pending, sig);
+        return NULL;
+    }
+    list_remove(&found->queue);
+    if (!more)
+        sigset_del(pending, sig);
+    return found;
+}
+
+struct sigqueue *dequeue_signal(sigset_t_ mask) {
+    struct sigqueue *sigqueue = dequeue_from(&current->queue, &current->pending, mask);
+    if (sigqueue == NULL)
+        sigqueue = dequeue_from(&current->group->shared_queue, &current->group->shared_pending, mask);
+    if (sigqueue != NULL && sigqueue->info.code == SI_TIMER_) {
+        int_t id = sigqueue->info.timer.timer;
+        if (id >= 0 && id < TIMERS_MAX) {
+            lock(&current->group->lock);
+            current->group->posix_timers[id].overrun_last = sigqueue->info.timer.overrun;
+            unlock(&current->group->lock);
+        }
+    }
+    return sigqueue;
+}
+
+// Whether a thread would take a process-directed signal: it does not block it, or it is waiting
+// for it in sigtimedwait.
+static bool thread_wants_signal(struct task *thread, int sig) {
+    if (thread->exiting || thread->zombie || thread->sighand == NULL)
+        return false;
+    if (!signal_is_blockable(sig))
+        return true;
+    return !sigset_has(thread->blocked, sig) || sigset_has(thread->waiting, sig);
+}
+
+// Call with pids_lock held, to walk the group's threads.
+static struct task *pick_signal_thread(struct task *task, int sig) {
+    if (thread_wants_signal(task, sig))
+        return task;
+    struct task *thread;
+    list_for_each_entry(&task->group->threads, thread, group_links) {
+        if (thread_wants_signal(thread, sig))
+            return thread;
+    }
+    return NULL;
+}
+
+// Get `target` out of whatever it is blocked in so it looks at its signals. Sighand lock held;
+// it is dropped and retaken around the wakeup.
+static void kick_thread(struct sighand *sighand, struct task *target) {
+    cpu_poke(&target->cpu);
+    if (target == current)
+        return;
+    pthread_kill(target->thread, SIGUSR1);
+
+    // wake up any pthread condition waiters
+    // actual madness, I hope to god it's correct
+    // must release the sighand lock while going insane, to avoid a deadlock
+    unlock(&sighand->lock);
+    // Wake up the target thread's condvar wait.
+    // We don't acquire waiting_lock (the associated mutex) because:
+    // 1. It may be held by the target thread inside pthread_cond_wait,
+    //    and spinning on it blocks the condvar from returning.
+    // 2. pthread_cond_broadcast() is safe without the mutex — worst case
+    //    is a spurious wakeup, which wait_for() handles via re-checking.
+    lock(&target->waiting_cond_lock);
+    if (target->waiting_cond != NULL)
+        notify(target->waiting_cond);
+    unlock(&target->waiting_cond_lock);
+    lock(&sighand->lock);
+}
+
+// Queue a signal and wake the thread that should take it. Sighand lock held. A shared
+// (process-directed) signal needs pids_lock too, to find that thread.
+static int deliver_signal_unlocked(struct task *task, int sig, struct siginfo_ info, bool shared) {
+    bool queued;
+    int err = enqueue_signal(task, sig, info, shared, &queued);
+    if (err < 0 || !queued)
+        return err;
+
+    struct sighand *sighand = task->sighand;
+    if (shared) {
+        struct task *target = pick_signal_thread(task, sig);
+        if (target != NULL)
+            kick_thread(sighand, target);
+        return 0;
+    }
+    if (sigset_has(task->blocked & ~task->waiting, sig) && signal_is_blockable(sig))
+        return 0;
+    kick_thread(sighand, task);
+    return 0;
 }
 
 void deliver_signal(struct task *task, int sig, struct siginfo_ info) {
     if (task->sighand == NULL)
         return;
     lock(&task->sighand->lock);
-    deliver_signal_unlocked(task, sig, info);
+    deliver_signal_unlocked(task, sig, info, false);
     unlock(&task->sighand->lock);
     cpu_poke(&task->cpu);
     signalfd_notify(task, sig);
 }
 
-void send_signal(struct task *task, int sig, struct siginfo_ info) {
+static int send_signal_common(struct task *task, int sig, struct siginfo_ info, bool shared) {
     // signal zero is for testing whether a process exists
     if (sig == 0)
-        return;
-    if (task->zombie || task->exiting)
-        return;
+        return 0;
+    if (task->zombie || task->exiting) {
+        // a process's signal still has somewhere to go while another of its threads is running
+        if (!shared || !signal_is_blockable(sig))
+            return 0;
+        struct task *alive = NULL, *thread;
+        list_for_each_entry(&task->group->threads, thread, group_links) {
+            if (!thread->exiting && !thread->zombie && thread->sighand != NULL) {
+                alive = thread;
+                break;
+            }
+        }
+        if (alive == NULL)
+            return 0;
+        task = alive;
+    }
 #ifdef GUEST_ARM64
     if ((sig == SIGTRAP_ || sig == SIGABRT_ || sig == SIGILL_ || sig == SIGSEGV_ || sig == SIGBUS_)
         && ish_exec_trace())
@@ -116,24 +315,23 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
 
     // Native offload: forward signal to the host native process
     if (native_offload_forward_signal(task, sig))
-        return;
+        return 0;
 
     struct sighand *sighand = task->sighand;
     if (sighand == NULL)
-        return;
+        return 0;
+    // SIGKILL and SIGSTOP act on the thread they are sent to
+    if (!signal_is_blockable(sig))
+        shared = false;
     lock(&sighand->lock);
     // Like Linux, a blocked signal is queued even if its action is to ignore
     // it, since the action may change before it is unblocked (and signalfd
     // readers depend on it, e.g. for SIGCHLD).
     bool queued = signal_action(sighand, sig) != SIGNAL_IGNORE ||
         (signal_is_blockable(sig) && sigset_has(task->blocked, sig));
-    if (queued) {
-        deliver_signal_unlocked(task, sig, info);
-        // Poke the target CPU so it exits the JIT loop at the next gadget
-        // boundary instead of waiting for INT_TIMER (up to 1024 cycles).
-        // This reduces signal delivery latency from ~1024 to ~1 gadget.
-        cpu_poke(&task->cpu);
-    }
+    int err = 0;
+    if (queued)
+        err = deliver_signal_unlocked(task, sig, info, shared);
     unlock(&sighand->lock);
     if (queued)
         signalfd_notify(task, sig);
@@ -144,6 +342,19 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
         notify(&task->group->stopped_cond);
         unlock(&task->group->lock);
     }
+    return err;
+}
+
+void send_signal(struct task *task, int sig, struct siginfo_ info) {
+    send_signal_common(task, sig, info, false);
+}
+
+void send_process_signal(struct task *task, int sig, struct siginfo_ info) {
+    send_signal_common(task, sig, info, true);
+}
+
+int send_signal_checked(struct task *task, int sig, struct siginfo_ info, bool thread_directed) {
+    return send_signal_common(task, sig, info, !thread_directed);
 }
 
 bool try_self_signal(int sig) {
@@ -154,7 +365,7 @@ bool try_self_signal(int sig) {
     bool can_send = signal_action(sighand, sig) != SIGNAL_IGNORE &&
         !sigset_has(current->blocked, sig);
     if (can_send)
-        deliver_signal_unlocked(current, sig, SIGINFO_NIL);
+        deliver_signal_unlocked(current, sig, SIGINFO_NIL, false);
     unlock(&sighand->lock);
     return can_send;
 }
@@ -168,7 +379,7 @@ int send_group_signal(dword_t pgid, int sig, struct siginfo_ info) {
     }
     struct tgroup *tgroup;
     list_for_each_entry(&pid->pgroup, tgroup, pgroup) {
-        send_signal(tgroup->leader, sig, info);
+        send_process_signal(tgroup->leader, sig, info);
     }
     unlock(&pids_lock);
     return 0;
@@ -469,21 +680,22 @@ void log_exit(int code) {
 #endif
 }
 
-static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
+// Returns whether the signal was set up to run a handler, which changes where the thread resumes.
+static bool receive_signal(struct sighand *sighand, struct siginfo_ *info) {
     int sig = info->sig;
     STRACE("%d receiving signal %d\n", current->pid, sig);
 
     int action_type = signal_action(sighand, sig);
     switch (action_type) {
         case SIGNAL_IGNORE:
-            return;
+            return false;
 
         case SIGNAL_STOP:
             lock(&current->group->lock);
             current->group->stopped = true;
             current->group->group_exit_code = sig << 8 | 0x7f;
             unlock(&current->group->lock);
-            return;
+            return false;
 
         case SIGNAL_KILL:
             unlock(&sighand->lock); // do_exit must be called without this lock
@@ -519,7 +731,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
                 } else {
                     do_exit_group(sig);
                 }
-                return;
+                return false;
             }
             if (sig == SIGABRT_) {
                 struct cpu_state *cpu = &current->cpu;
@@ -536,7 +748,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
                 } else {
                     do_exit_group(sig);
                 }
-                return;
+                return false;
             }
             // V8 scope corruption GPF cascade: the deep frame unwind in
             // handle_interrupt may leave a background thread with a corrupt
@@ -548,7 +760,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
                 struct cpu_state *cpu = &current->cpu;
                 if (cpu->pc >= 0xb0000000 && cpu->pc < 0xf0000000) {
                     do_exit_group(1 << 8);
-                    return;
+                    return false;
                 }
             }
             // If this process has already committed to a V8 fatal abort
@@ -561,7 +773,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
             // surface as "Segmentation fault" / non-zero exit.
             if (sig == SIGSEGV_ && current->group && current->group->v8_aborting) {
                 do_exit_group(0);
-                return;
+                return false;
             }
 #endif
             do_exit_group(sig);
@@ -674,6 +886,7 @@ static void receive_signal(struct sighand *sighand, struct siginfo_ *info) {
 
     if (action->flags & SA_RESETHAND_)
         *action = (struct sigaction_) {.handler = SIG_DFL_};
+    return true;
 }
 
 void signal_delivery_stop(int sig, struct siginfo_ *info) {
@@ -724,24 +937,29 @@ void receive_signals() {
         current->blocked = current->saved_mask;
     }
 
-    struct sigqueue *sigqueue, *tmp;
-    list_for_each_entry_safe(&current->queue, sigqueue, tmp, queue) {
-        int sig = sigqueue->info.sig;
-        if (sigset_has(blocked, sig))
-            continue;
-        list_remove(&sigqueue->queue);
-        sigset_del(&current->pending, sig);
-
+    // A handler frame changes where the thread resumes, so set up one handler at a time, as Linux
+    // does: when it returns (sigreturn) this runs again for the next signal. Signals with no
+    // handler (ignored, stop, terminate) don't need that.
+    blocked &= ~UNBLOCKABLE_MASK;
+    struct sigqueue *sigqueue;
+    while ((sigqueue = dequeue_signal(~blocked)) != NULL) {
+        // Free the entry first: a fatal signal never returns from receive_signal, and
+        // its RLIMIT_SIGPENDING charge would be kept for ever.
+        struct siginfo_ info = sigqueue->info;
+        sigqueue_free(sigqueue);
+        int sig = info.sig;
+        bool handler = false;
         if (current->ptrace.traced && sig != SIGKILL_) {
             // This notifies the parent, goes to sleep, and waits for the
             // parent to tell it to continue.
             // Any signals received while waiting are left on the queue, except
             // for SIGKILL_, which causes an immediate exit.
-            signal_delivery_stop(sig, &sigqueue->info);
+            signal_delivery_stop(sig, &info);
         } else {
-            receive_signal(sighand, &sigqueue->info);
+            handler = receive_signal(sighand, &info);
         }
-        free(sigqueue);
+        if (handler)
+            break;
     }
 
     unlock(&sighand->lock);
@@ -1019,7 +1237,7 @@ dword_t sys_rt_sigprocmask(dword_t how, addr_t set_addr, addr_t oldset_addr, dwo
 int_t sys_rt_sigpending(addr_t set_addr, dword_t size) {
     STRACE("rt_sigpending(%#x, %d)", set_addr, size);
     // as defined by the standard
-    sigset_t_ pending = current->pending & current->blocked;
+    sigset_t_ pending = task_pending_all(current) & current->blocked;
     return user_put_sigset(set_addr, size, pending);
 }
 
@@ -1106,6 +1324,7 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
     int err = user_get_sigset(set_addr, set_size, &set);
     if (err)
         return err;
+    set &= ~UNBLOCKABLE_MASK; // SIGKILL and SIGSTOP cannot be waited for
     struct timespec timeout;
     if (timeout_addr != 0) {
         struct timespec_ fake_timeout;
@@ -1116,34 +1335,66 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
     }
     STRACE("sigtimedwait(%#llx, %#x, %#x) = ...\n", (long long) set, info_addr, timeout_addr);
 
-    lock(&current->sighand->lock);
-    assert(current->waiting == 0);
-    current->waiting = set;
-    int wait_err;
-    do {
-        wait_err = wait_for(&current->pause, &current->sighand->lock, timeout_addr == 0 ? NULL : &timeout);
-    } while (wait_err == 0);
-    current->waiting = 0;
-    if (wait_err == _ETIMEDOUT) {
-        unlock(&current->sighand->lock);
-        STRACE("sigtimedwait timed out\n");
-        return _EAGAIN;
+    struct timespec deadline;
+    if (timeout_addr != 0) {
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec += timeout.tv_sec;
+        deadline.tv_nsec += timeout.tv_nsec;
+        if (deadline.tv_nsec >= 1000000000) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000;
+        }
     }
 
+    lock(&current->sighand->lock);
+    assert(current->waiting == 0);
     struct sigqueue *sigqueue;
-    bool found = false;
-    list_for_each_entry(&current->queue, sigqueue, queue) {
-        if (sigset_has(set, sigqueue->info.sig)) {
-            found = true;
-            list_remove(&sigqueue->queue);
+    for (;;) {
+        sigqueue = dequeue_signal(set);
+        if (sigqueue != NULL)
+            break;
+
+        // nothing pending: sleep until a signal in the set is sent to this thread or its process
+        struct timespec remaining;
+        if (timeout_addr != 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            remaining.tv_sec = deadline.tv_sec - now.tv_sec;
+            remaining.tv_nsec = deadline.tv_nsec - now.tv_nsec;
+            if (remaining.tv_nsec < 0) {
+                remaining.tv_sec--;
+                remaining.tv_nsec += 1000000000;
+            }
+            if (remaining.tv_sec < 0 || (remaining.tv_sec == 0 && remaining.tv_nsec == 0)) {
+                unlock(&current->sighand->lock);
+                STRACE("sigtimedwait timed out\n");
+                return _EAGAIN;
+            }
+        }
+        current->waiting = set;
+        int wait_err = wait_for(&current->pause, &current->sighand->lock, timeout_addr == 0 ? NULL : &remaining);
+        current->waiting = 0;
+        if (wait_err == _ETIMEDOUT) {
+            sigqueue = dequeue_signal(set);
+            if (sigqueue == NULL) {
+                unlock(&current->sighand->lock);
+                STRACE("sigtimedwait timed out\n");
+                return _EAGAIN;
+            }
+            break;
+        }
+        if (wait_err == _EINTR) {
+            // a signal this thread doesn't block arrived: a handler runs, unless ours came too
+            sigqueue = dequeue_signal(set);
             break;
         }
     }
     unlock(&current->sighand->lock);
+    bool found = sigqueue != NULL;
     if (!found)
         return _EINTR;
     struct siginfo_ info = sigqueue->info;
-    free(sigqueue);
+    sigqueue_free(sigqueue);
     if (info_addr != 0)
         if (user_put(info_addr, info))
             return _EFAULT;
@@ -1151,20 +1402,25 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
     return info.sig;
 }
 
-static int kill_task(struct task *task, dword_t sig) {
+// thread_directed: the signal is for this thread alone (tkill, tgkill); otherwise for its whole
+// process, whichever thread takes it. Call with pids_lock held.
+static int kill_task_info(struct task *task, dword_t sig, struct siginfo_ info, bool thread_directed) {
     if (!superuser() &&
             current->uid != task->uid &&
             current->uid != task->suid &&
             current->euid != task->uid &&
             current->euid != task->suid)
         return _EPERM;
+    return send_signal_checked(task, sig, info, thread_directed);
+}
+
+static int kill_task(struct task *task, dword_t sig, bool thread_directed) {
     struct siginfo_ info = {
-        .code = SI_USER_,
-        .kill.pid = current->pid,
+        .code = thread_directed ? SI_TKILL_ : SI_USER_,
+        .kill.pid = current->tgid,
         .kill.uid = current->uid,
     };
-    send_signal(task, sig, info);
-    return 0;
+    return kill_task_info(task, sig, info, thread_directed);
 }
 
 // Signal a set of processes collected under pids_lock. The lock is taken again
@@ -1177,7 +1433,7 @@ static int kill_pids(const pid_t_ *pids, int count, dword_t sig) {
         lock(&pids_lock);
         // like Linux, a zombie can still be signaled (to no effect)
         struct task *task = pid_get_task_zombie(pids[i]);
-        int kill_err = task != NULL ? kill_task(task, sig) : _ESRCH;
+        int kill_err = task != NULL ? kill_task(task, sig, false) : _ESRCH;
         unlock(&pids_lock);
         // an error only if no process could be signaled
         if (err != 0 && kill_err != _ESRCH)
@@ -1232,7 +1488,7 @@ static int kill_everything(dword_t sig) {
     return count == 0 ? _ESRCH : err;
 }
 
-static int do_kill(pid_t_ pid, dword_t sig, pid_t_ tgid) {
+static int do_kill(pid_t_ pid, dword_t sig, pid_t_ tgid, bool thread_directed) {
     STRACE("kill(%d, %d)", pid, sig);
     if (sig >= NUM_SIGS)
         return _EINVAL;
@@ -1257,21 +1513,59 @@ static int do_kill(pid_t_ pid, dword_t sig, pid_t_ tgid) {
         return _ESRCH;
     }
 
-    int err = kill_task(task, sig);
+    int err = kill_task(task, sig, thread_directed);
     unlock(&pids_lock);
     return err;
 }
 
 dword_t sys_kill(pid_t_ pid, dword_t sig) {
-    return do_kill(pid, sig, 0);
+    return do_kill(pid, sig, 0, false);
 }
+// rt_sigqueueinfo / rt_tgsigqueueinfo: send a signal with caller-supplied siginfo.
+// Like Linux, only the sender itself may forge a positive si_code (SI_USER and up).
+static int queue_signal_info(pid_t_ tid, pid_t_ tgid, dword_t sig, addr_t info_addr, bool thread_directed) {
+    if (sig >= NUM_SIGS)
+        return _EINVAL;
+    struct siginfo_ info;
+    if (user_get(info_addr, info))
+        return _EFAULT;
+
+    lock(&pids_lock);
+    struct task *task = pid_get_task(tid);
+    if (task == NULL || (tgid != 0 && task->tgid != tgid)) {
+        unlock(&pids_lock);
+        return _ESRCH;
+    }
+    if ((info.code >= 0 || info.code == SI_TKILL_) && task->group != current->group) {
+        unlock(&pids_lock);
+        return _EPERM;
+    }
+    int err = kill_task_info(task, sig, info, thread_directed);
+    unlock(&pids_lock);
+    return err;
+}
+
+dword_t sys_rt_sigqueueinfo(pid_t_ pid, dword_t sig, addr_t info_addr) {
+    STRACE("rt_sigqueueinfo(%d, %d, %#x)", pid, sig, info_addr);
+    if (pid <= 0)
+        return _EINVAL;
+    return queue_signal_info(pid, 0, sig, info_addr, false);
+}
+
+dword_t sys_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid, dword_t sig, addr_t info_addr) {
+    STRACE("rt_tgsigqueueinfo(%d, %d, %d, %#x)", tgid, tid, sig, info_addr);
+    if (tid <= 0 || tgid <= 0)
+        return _EINVAL;
+    return queue_signal_info(tid, tgid, sig, info_addr, true);
+}
+
 dword_t sys_tgkill(pid_t_ tgid, pid_t_ tid, dword_t sig) {
     if (tid <= 0 || tgid <= 0)
         return _EINVAL;
-    return do_kill(tid, sig, tgid);
+    return do_kill(tid, sig, tgid, true);
 }
 dword_t sys_tkill(pid_t_ tid, dword_t sig) {
     if (tid <= 0)
         return _EINVAL;
-    return do_kill(tid, sig, 0);
+    return do_kill(tid, sig, 0, true);
 }

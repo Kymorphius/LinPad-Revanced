@@ -137,7 +137,7 @@ noreturn void do_exit(int status) {
     struct sigqueue *sigqueue, *sigqueue_tmp;
     list_for_each_entry_safe(&current->queue, sigqueue, sigqueue_tmp, queue) {
         list_remove(&sigqueue->queue);
-        free(sigqueue);
+        sigqueue_free(sigqueue);
     }
     struct task *leader = current->group->leader;
 
@@ -171,16 +171,23 @@ noreturn void do_exit(int status) {
         } else {
             leader->zombie = true;
             notify(&parent->group->child_exit);
+            // The child's wait status is its leader's, or the group's after exit_group, whichever
+            // thread happens to be the last to exit: the same one waitpid reports (reap_if_zombie).
+            // It is the exit code << 8, or the terminating signal | 0x80 if it dumped core.
+            dword_t wait_status = leader->exit_code;
+            if (current->group->doing_group_exit)
+                wait_status = current->group->group_exit_code;
+            int child_signal = wait_status & 0x7f;
             struct siginfo_ info = {
-                .code = SI_KERNEL_,
-                .child.pid = current->pid,
-                .child.uid = current->uid,
-                .child.status = current->exit_code,
+                .code = child_signal == 0 ? CLD_EXITED_ : (wait_status & 0x80 ? CLD_DUMPED_ : CLD_KILLED_),
+                .child.pid = leader->pid,
+                .child.uid = leader->uid,
+                .child.status = child_signal == 0 ? (wait_status >> 8) & 0xff : child_signal,
                 .child.utime = clock_from_timeval(group_rusage.utime),
                 .child.stime = clock_from_timeval(group_rusage.stime),
             };
             if (leader->exit_signal != 0)
-                send_signal(parent, leader->exit_signal, info);
+                send_process_signal(parent, leader->exit_signal, info);
         }
 
         if (exit_hook != NULL)
@@ -474,7 +481,7 @@ void de_thread(void) {
     list_for_each_entry_safe(&current->queue, sigqueue, sigqueue_tmp, queue) {
         if (sigqueue->info.sig == SIGKILL_) {
             list_remove(&sigqueue->queue);
-            free(sigqueue);
+            sigqueue_free(sigqueue);
         }
     }
     sigset_del(&current->pending, SIGKILL_);
@@ -591,6 +598,13 @@ static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out, struct 
 
     // tear down group
     cond_destroy(&task->group->child_exit);
+    {
+        struct sigqueue *sigqueue, *sigqueue_tmp;
+        list_for_each_entry_safe(&task->group->shared_queue, sigqueue, sigqueue_tmp, queue) {
+            list_remove(&sigqueue->queue);
+            sigqueue_free(sigqueue);
+        }
+    }
     task_leave_session(task);
     list_remove(&task->group->pgroup);
     free(task->group);

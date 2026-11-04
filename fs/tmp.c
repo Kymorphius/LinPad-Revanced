@@ -1,8 +1,11 @@
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <string.h>
 #include "kernel/task.h"
 #include "kernel/errno.h"
+#include "kernel/calls.h"
 #include "kernel/fs.h"
+#include "kernel/memory.h"
 #include "fs/path.h"
 #include "fs/poll.h"
 #include "util/refcount.h"
@@ -79,6 +82,8 @@ DEFINE_REFCOUNT_STATIC(tmp_dirent)
 static void tmp_dirent_cleanup(struct tmp_dirent *dirent) {
     list_remove(&dirent->dir); // TODO locking thinking emoji
     tmp_inode_release(dirent->inode);
+    if (dirent->parent != NULL)
+        tmp_dirent_release(dirent->parent);
     free(dirent);
 }
 
@@ -217,6 +222,7 @@ static int tmpfs_mount(struct mount *mount) {
     }
 
     tmp_dirent_init(root);
+    list_init(&root->dir);
     strcpy(root->name, "");
     root->inode = root_inode;
     root->parent = NULL;
@@ -225,27 +231,20 @@ static int tmpfs_mount(struct mount *mount) {
     return 0;
 }
 
-#if 0
 // This is the only place where a tmpfs directory tree is recursively freed.
-static void tmpfs_unmount_tree(struct tmp_inode *tree) {
-    assert(refcount_get(tree) == 1); // otherwise mount_remove should have returned EBUSY
-    if (S_ISDIR(tree->stat.mode)) {
-        struct tmp_dirent *dirent, *tmp;
-        list_for_each_entry_safe(&tree->dir.entries, dirent, tmp, dir) {
-            if (dirent->inode != NULL)
-                tmpfs_unmount_tree(dirent->inode);
-            tmp_dirent_release(dirent);
-        }
-    }
-    tmp_inode_release(tree);
+// mount_remove has already returned EBUSY if anything still referenced the
+// mount, so the only references left are the tree's own: one per dirent from
+// the directory listing, and one per child on its parent.
+static void tmpfs_unmount_tree(struct tmp_dirent *dirent) {
+    struct tmp_dirent *child, *tmp;
+    list_for_each_entry_safe(&dirent->children, child, tmp, dir)
+        tmpfs_unmount_tree(child);
+    tmp_dirent_release(dirent);
 }
-#endif
 
-static int tmpfs_umount(struct mount *UNUSED(mount)) {
-    // big fat fuckin TODO
-    // struct tmp_inode *root = mount->data;
-    // tmpfs_unmount_tree(root);
-    TODO("tmpfs umount");
+static int tmpfs_umount(struct mount *mount) {
+    tmpfs_unmount_tree(mount->data);
+    mount->data = NULL;
     return 0;
 }
 
@@ -370,6 +369,7 @@ static int tmpfs_getpath(struct fd *fd, char *buf) {
             return _ENAMETOOLONG;
         p[0] = '/';
         memcpy(&p[1], dirent->name, name_len);
+        dirent = dirent->parent;
     }
     memmove(buf, p, strlen(p) + 1);
     return 0;
@@ -445,6 +445,32 @@ static off_t_ tmpfs_lseek(struct fd *fd, off_t_ off, int whence) {
     return fd->offset;
 }
 
+// Only private mappings: they get a copy of the file's current contents, which
+// is all execve needs to load a binary that lives on tmpfs. A shared mapping
+// would have to alias file_data, which realloc moves.
+static int tmpfs_mmap(struct fd *fd, struct mem *mem, page_t start, pages_t pages, off_t offset, int prot, int flags) {
+    if (!(flags & MMAP_PRIVATE))
+        return _ENODEV;
+    struct tmp_inode *inode = tmpfs_fd_inode(fd);
+    if (!S_ISREG(inode->stat.mode))
+        return _ENODEV;
+    // the mapping starts as a copy of the file, so the descriptor has to be readable
+    if ((fd->flags & O_ACCMODE_) == O_WRONLY_)
+        return _EACCES;
+    size_t map_size = pages * PAGE_SIZE;
+    char *memory = mem_host_alloc_fails() ? MAP_FAILED : mmap(NULL, map_size,
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (memory == MAP_FAILED)
+        return _ENOMEM;
+    lock(&inode->lock);
+    if ((uint64_t) offset < inode->stat.size) {
+        size_t available = inode->stat.size - offset;
+        memcpy(memory, (char *) inode->file_data + offset, available < map_size ? available : map_size);
+    }
+    unlock(&inode->lock);
+    return pt_map(mem, start, pages, memory, 0, prot);
+}
+
 static int tmpfs_readdir(struct fd *fd, struct dir_entry *entry) {
     struct tmp_dirent *parent = fd->tmpfs.dirent;
     int res = _ENOTDIR;
@@ -518,6 +544,7 @@ const struct fd_ops tmpfs_fdops = {
     .read = tmpfs_read,
     .write = tmpfs_write,
     .lseek = tmpfs_lseek,
+    .mmap = tmpfs_mmap,
     .readdir = tmpfs_readdir,
     .telldir = tmpfs_telldir,
     .seekdir = tmpfs_seekdir,

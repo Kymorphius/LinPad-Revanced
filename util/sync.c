@@ -28,7 +28,7 @@ static bool is_signal_pending(lock_t *lock) {
         return false;
     if (lock != &current->sighand->lock)
         lock(&current->sighand->lock);
-    bool pending = !!(current->pending & ~current->blocked);
+    bool pending = !!task_pending_unblocked(current);
     if (lock != &current->sighand->lock)
         unlock(&current->sighand->lock);
     return pending;

@@ -48,6 +48,8 @@ static struct tgroup *tgroup_copy(struct tgroup *old_group) {
     struct tgroup *group = malloc(sizeof(struct tgroup));
     *group = *old_group;
     list_init(&group->threads);
+    group->shared_pending = 0;
+    list_init(&group->shared_queue);
     list_add(&old_group->pgroup, &group->pgroup);
     list_add(&old_group->session, &group->session);
     if (group->tty) {

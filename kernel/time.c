@@ -109,10 +109,11 @@ dword_t sys_clock_settime(dword_t UNUSED(clock), addr_t UNUSED(tp)) {
 }
 
 static void itimer_notify(struct task *task) {
-    struct siginfo_ info = {
-        .code = SI_TIMER_,
-    };
-    send_signal(task, SIGALRM_, info);
+    // an interval timer's SIGALRM comes from the kernel; SI_TIMER is for POSIX timers, which have ids
+    struct siginfo_ info = SIGINFO_NIL;
+    lock(&pids_lock);
+    send_process_signal(task, SIGALRM_, info);
+    unlock(&pids_lock);
 }
 
 static int itimer_set(struct tgroup *group, int which, struct timer_spec spec, struct timer_spec *old_spec) {
@@ -324,8 +325,12 @@ static void posix_timer_callback(struct posix_timer *timer) {
     lock(&pids_lock);
     struct task *thread = pid_get_task(timer->thread_pid);
     // TODO: solve pid reuse. currently we have two ways of referring to a task: pid_t_ and struct task *. pids get reused. task struct pointers get freed on exit or reap. need a third option for cases like this, like a refcount layer.
-    if (thread != NULL)
-        send_signal(thread, timer->signal, info);
+    if (thread != NULL) {
+        if (timer->thread_directed)
+            send_signal(thread, timer->signal, info);
+        else
+            send_process_signal(thread, timer->signal, info);
+    }
     unlock(&pids_lock);
 }
 
@@ -344,11 +349,17 @@ int_t sys_timer_create(dword_t clock, addr_t sigevent_addr, addr_t timer_addr) {
     if (sigev.method != SIGEV_SIGNAL_ && sigev.method != SIGEV_NONE_ && sigev.method != SIGEV_THREAD_ID_)
         return _EINVAL;
 
+    if (sigev.method != SIGEV_NONE_ && (sigev.signo <= 0 || sigev.signo >= NUM_SIGS))
+        return _EINVAL;
+
     if (sigev.method == SIGEV_THREAD_ID_) {
+        // the target must be a thread of the calling process
         lock(&pids_lock);
-        if (pid_get_task(sigev.tid) == NULL)
-            return _EINVAL;
+        struct task *target = pid_get_task(sigev.tid);
+        bool valid = target != NULL && target->group == current->group;
         unlock(&pids_lock);
+        if (!valid)
+            return _EINVAL;
     }
 
     struct tgroup *group = current->group;
@@ -372,13 +383,16 @@ int_t sys_timer_create(dword_t clock, addr_t sigevent_addr, addr_t timer_addr) {
     timer->timer = timer_new(real_clockid, (timer_callback_t) posix_timer_callback, timer);
     timer->signal = sigev.signo;
     timer->sig_value = sigev.value;
+    timer->overrun_last = 0;
     timer->tgroup = NULL;
     if (sigev.method == SIGEV_SIGNAL_) {
         timer->tgroup = group;
-        timer->thread_pid = 0;
+        timer->thread_pid = group->leader->pid;
+        timer->thread_directed = false;
     } else if (sigev.method == SIGEV_THREAD_ID_) {
         timer->tgroup = group;
-        timer->thread_pid = group->leader->pid;
+        timer->thread_pid = sigev.tid;
+        timer->thread_directed = true;
     }
     unlock(&group->lock);
     return 0;
@@ -455,8 +469,10 @@ int_t sys_timer_getoverrun(dword_t timer_id) {
         unlock(&current->group->lock);
         return _EINVAL;
     }
+    // expirations that went unnoticed while the last signal taken was pending
+    int_t overrun = pt->overrun_last;
     unlock(&current->group->lock);
-    return 0;
+    return overrun;
 }
 
 int_t sys_timer_delete(dword_t timer_id) {

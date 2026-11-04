@@ -34,7 +34,8 @@ int access_check(struct statbuf *stat, int check) {
     } else if (current->egid == stat->gid) {
         check <<= 3;
     }
-    if (!(stat->mode & check))
+    // every requested permission must be granted, not just one of them
+    if ((stat->mode & check) != check)
         return _EACCES;
     return 0;
 }
@@ -245,8 +246,10 @@ static ssize_t sys_read_buf(fd_t fd_no, void *buf, size_t size) {
     return res;
 }
 
-dword_t sys_read(fd_t fd_no, addr_t buf_addr, dword_t size) {
-    STRACE("read(%d, 0x%x, %d)", fd_no, buf_addr, size);
+dword_t sys_read(fd_t fd_no, addr_t buf_addr, addr_t size) {
+    STRACE("read(%d, 0x%llx, %lld)", fd_no, (unsigned long long) buf_addr, (long long) size);
+    if (size > MAX_RW_COUNT)
+        size = MAX_RW_COUNT;
     char *buf = (char *) malloc(size);
     if (buf == NULL)
         return _ENOMEM;
@@ -355,7 +358,9 @@ static ssize_t sys_write_buf(fd_t fd_no, void *buf, size_t size) {
     return res;
 }
 
-dword_t sys_write(fd_t fd_no, addr_t buf_addr, dword_t size) {
+dword_t sys_write(fd_t fd_no, addr_t buf_addr, addr_t size) {
+    if (size > MAX_RW_COUNT)
+        size = MAX_RW_COUNT;
     // FIXME this is a DOS vector, should ideally use vectorized I/O
     char *buf = malloc(size);
     if (buf == NULL)
@@ -543,8 +548,10 @@ qword_t sys_lseek64(fd_t f, sqword_t off, dword_t whence) {
     return res;
 }
 
-dword_t sys_pread(fd_t f, addr_t buf_addr, dword_t size, off_t_ off) {
-    STRACE("pread(%d, 0x%x, %d, %d)", f, buf_addr, size, off);
+dword_t sys_pread(fd_t f, addr_t buf_addr, addr_t size, off_t_ off) {
+    STRACE("pread(%d, 0x%llx, %lld, %lld)", f, (unsigned long long) buf_addr, (long long) size, (long long) off);
+    if (size > MAX_RW_COUNT)
+        size = MAX_RW_COUNT;
     struct fd *fd = f_get(f);
     if (fd == NULL)
         return _EBADF;
@@ -580,7 +587,9 @@ out:
     return res;
 }
 
-dword_t sys_pwrite(fd_t f, addr_t buf_addr, dword_t size, off_t_ off) {
+dword_t sys_pwrite(fd_t f, addr_t buf_addr, addr_t size, off_t_ off) {
+    if (size > MAX_RW_COUNT)
+        size = MAX_RW_COUNT;
     STRACE("pwrite(%d, 0x%x, %d, %d)", f, buf_addr, size, off);
     struct fd *fd = f_get(f);
     if (fd == NULL)
@@ -1189,7 +1198,7 @@ dword_t sys_truncate64(addr_t path_addr, off_t_ size) {
     char path[MAX_PATH];
     if (user_read_string(path_addr, path, sizeof(path)))
         return _EFAULT;
-    return generic_setattrat(NULL, path, make_attr(size, size), true);
+    return generic_setattrat(AT_PWD, path, make_attr(size, size), true);
 }
 
 dword_t sys_ftruncate64(fd_t f, off_t_ size) {
@@ -1219,7 +1228,7 @@ dword_t sys_truncate64(addr_t path_addr, dword_t size_low, dword_t size_high) {
     char path[MAX_PATH];
     if (user_read_string(path_addr, path, sizeof(path)))
         return _EFAULT;
-    return generic_setattrat(NULL, path, make_attr(size, size), true);
+    return generic_setattrat(AT_PWD, path, make_attr(size, size), true);
 }
 
 dword_t sys_ftruncate64(fd_t f, dword_t size_low, dword_t size_high) {
@@ -1282,11 +1291,13 @@ dword_t sys_fsync(fd_t f) {
 }
 
 // a few stubs
-dword_t sys_sendfile(fd_t out_fd, fd_t in_fd, addr_t offset_addr, dword_t count) {
+dword_t sys_sendfile(fd_t out_fd, fd_t in_fd, addr_t offset_addr, addr_t count) {
     return sys_sendfile64(out_fd, in_fd, offset_addr, count);
 }
-dword_t sys_sendfile64(fd_t out_fd, fd_t in_fd, addr_t offset_addr, dword_t count) {
-    STRACE("sendfile64(%d, %d, 0x%x, %d)", out_fd, in_fd, offset_addr, count);
+dword_t sys_sendfile64(fd_t out_fd, fd_t in_fd, addr_t offset_addr, addr_t count) {
+    STRACE("sendfile64(%d, %d, 0x%llx, %lld)", out_fd, in_fd, (unsigned long long) offset_addr, (long long) count);
+    if (count > MAX_RW_COUNT)
+        count = MAX_RW_COUNT;
     struct fd *in = f_get(in_fd);
     if (in == NULL)
         return _EBADF;
@@ -1347,12 +1358,15 @@ dword_t sys_sendfile64(fd_t out_fd, fd_t in_fd, addr_t offset_addr, dword_t coun
     }
     return total;
 }
-dword_t sys_splice(fd_t UNUSED(in_fd), addr_t UNUSED(in_off_addr), fd_t UNUSED(out_fd), addr_t UNUSED(out_off_addr), dword_t UNUSED(count), dword_t UNUSED(flags)) {
+dword_t sys_splice(fd_t UNUSED(in_fd), addr_t UNUSED(in_off_addr), fd_t UNUSED(out_fd), addr_t UNUSED(out_off_addr), addr_t UNUSED(count), dword_t UNUSED(flags)) {
     return _EINVAL;
 }
 dword_t sys_copy_file_range(fd_t in_fd, addr_t in_off_addr, fd_t out_fd,
-        addr_t out_off_addr, dword_t len, uint_t flags) {
-    STRACE("copy_file_range(%d, 0x%x, %d, 0x%x, %d, %d)", in_fd, in_off_addr, out_fd, out_off_addr, len, flags);
+        addr_t out_off_addr, addr_t len, uint_t flags) {
+    STRACE("copy_file_range(%d, 0x%llx, %d, 0x%llx, %lld, %d)", in_fd, (unsigned long long) in_off_addr, out_fd,
+            (unsigned long long) out_off_addr, (long long) len, flags);
+    if (len > MAX_RW_COUNT)
+        len = MAX_RW_COUNT;
     if (flags != 0)
         return _EINVAL;
     struct fd *in = f_get(in_fd);

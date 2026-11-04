@@ -129,8 +129,7 @@ void handle_interrupt(int interrupt) {
                 // signal frame. Do NOT touch regs[0] — it was already restored
                 // by restore_sigcontext. Any post-processing could corrupt the
                 // restored x0 value (e.g., errno sign-extension).
-                if (syscall_num == 139 /* rt_sigreturn */ ||
-                    syscall_num == 119 /* sigreturn */) {
+                if (syscall_num == 139 /* rt_sigreturn */) {
                     // x0 already set by restore_sigcontext, skip writeback
                 } else {
                     // ARM64 Linux ABI: return value in x0. Errors are negative
@@ -1169,7 +1168,7 @@ static bool fast_io_signal_pending(void) {
     if (current->sighand == NULL)
         return false;
     lock(&current->sighand->lock);
-    bool pending = !!(current->pending & ~current->blocked);
+    bool pending = !!task_pending_unblocked(current);
     unlock(&current->sighand->lock);
     return pending;
 }

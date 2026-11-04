@@ -29,7 +29,7 @@ To rebuild from scratch:
 ```sh
 cd /Volumes/ExternalHD/Dev/ish-arm64
 export PATH=/opt/homebrew/opt/lld/bin:/opt/homebrew/opt/llvm/bin:$PATH
-xcodebuild -skipMacroValidation -project iSH.xcodeproj -target iSH-ARM64 -configuration Release -sdk iphoneos \
+xcodebuild -skipMacroValidation -project iSH.xcodeproj -scheme iSH-ARM64 -configuration Release -destination generic/platform=iOS \
   -allowProvisioningUpdates SYMROOT=$PWD/build-ios-release IPHONEOS_DEPLOYMENT_TARGET=16.0 \
   DEVELOPMENT_TEAM=<TEAM_ID> ISH_JIT_BUILD=enabled build
 release/embed-rootfs.sh --device "build-ios-release/Release-iphoneos/iSH ARM64.app" \

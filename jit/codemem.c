@@ -35,6 +35,7 @@
 #include <os/proc.h>
 #endif
 #include "jit/jit_internal.h"
+#include "jit/probe.h"
 #include "platform/platform.h"
 
 #define CHUNK_SIZE (2u << 20)
@@ -289,6 +290,13 @@ done_ios:
         mode = "MAP_JIT";
     }
 done:
+#endif
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    // The flags above can say yes with the region still not executable (issue #9).
+    if (!named_chunks && !jit_probe_executable((uint32_t *) arena_rw, (uint32_t *) arena_rx)) {
+        fprintf(stderr, "ish: JIT code memory (%s) is not executable, staying off\n", mode);
+        return false;
+    }
 #endif
     nchunks = arena_size / CHUNK_SIZE;
     // The iOS policy also applies where an iOS memory limit is emulated

@@ -189,6 +189,9 @@ jobs:
       - name: Native listener repair regressions
         run: tests/unit/sockrestart-test.sh
 
+      - name: JIT executable-memory probe
+        run: tests/unit/jit-probe-test.sh
+
       - name: Terminal keyboard geometry regressions
         run: tests/unit/terminal-keyboard-test.sh
 
@@ -234,6 +237,12 @@ jobs:
           FAKEFS: ${{ runner.temp }}/fakefs
           OUT: ${{ runner.temp }}/arm64-insn
         run: tests/arm64-insn/smoke.sh
+
+      - name: Guest syscall regressions
+        env:
+          ISH: ${{ github.workspace }}/build/ish
+          FAKEFS: ${{ runner.temp }}/fakefs
+        run: tests/syscalls/smoke.sh
 
       - uses: actions/upload-artifact@v4
         if: failure()

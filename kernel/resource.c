@@ -323,10 +323,30 @@ int_t sys_sched_setscheduler(pid_t_ UNUSED(pid), int_t policy, addr_t param_addr
     return 0;
 }
 
+#define SCHED_FIFO_ 1
+#define SCHED_RR_ 2
+#define SCHED_BATCH_ 3
+#define SCHED_IDLE_ 5
+
 int_t sys_sched_get_priority_max(int_t policy) {
     STRACE("sched_get_priority_max(%d)", policy);
-    if (policy == 0)
-        return 0;
+    switch (policy) {
+        case SCHED_FIFO_: case SCHED_RR_:
+            return 99;
+        case SCHED_OTHER_: case SCHED_BATCH_: case SCHED_IDLE_:
+            return 0;
+    }
+    return _EINVAL;
+}
+
+int_t sys_sched_get_priority_min(int_t policy) {
+    STRACE("sched_get_priority_min(%d)", policy);
+    switch (policy) {
+        case SCHED_FIFO_: case SCHED_RR_:
+            return 1;
+        case SCHED_OTHER_: case SCHED_BATCH_: case SCHED_IDLE_:
+            return 0;
+    }
     return _EINVAL;
 }
 

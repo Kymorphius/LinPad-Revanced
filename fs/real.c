@@ -172,7 +172,7 @@ static bool guest_signal_pending(void) {
     if (current == NULL || current->sighand == NULL)
         return false;
     lock(&current->sighand->lock);
-    bool pending = !!(current->pending & ~current->blocked);
+    bool pending = !!task_pending_unblocked(current);
     unlock(&current->sighand->lock);
     return pending;
 }

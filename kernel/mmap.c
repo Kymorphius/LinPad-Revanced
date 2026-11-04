@@ -106,7 +106,7 @@ void mm_release(struct mm *mm) {
 
 // file: map this open file description instead of fd_no (SysV shared memory).
 static addr_t do_mmap(addr_t addr, uint64_t len, dword_t prot, dword_t flags, fd_t fd_no, struct fd *file,
-        dword_t offset) {
+        uint64_t offset) {
     int err;
     pages_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
     if (!pages) return _EINVAL;
@@ -272,8 +272,8 @@ addr_t mmap_file(addr_t addr, uint64_t len, dword_t prot, dword_t flags, struct 
     return do_mmap(addr, len, prot, flags, -1, file, 0);
 }
 
-static addr_t mmap_common(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_t fd_no, dword_t offset) {
-    STRACE("mmap(0x%x, 0x%x, 0x%x, 0x%x, %d, %d)", addr, len, prot, flags, fd_no, offset);
+static addr_t mmap_common(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_t fd_no, uint64_t offset) {
+    STRACE("mmap(0x%x, 0x%x, 0x%x, 0x%x, %d, %lld)", addr, len, prot, flags, fd_no, (long long) offset);
     if (len == 0)
         return _EINVAL;
     if (prot & ~P_RWX)
@@ -288,7 +288,7 @@ static addr_t mmap_common(addr_t addr, dword_t len, dword_t prot, dword_t flags,
 }
 
 addr_t sys_mmap2(addr_t addr, dword_t len, dword_t prot, dword_t flags, fd_t fd_no, dword_t offset) {
-    return mmap_common(addr, len, prot, flags, fd_no, offset << PAGE_BITS);
+    return mmap_common(addr, len, prot, flags, fd_no, (uint64_t) offset << PAGE_BITS);
 }
 
 #if defined(GUEST_ARM64)
@@ -304,7 +304,7 @@ addr_t sys_mmap64(addr_t addr, addr_t len, dword_t prot, dword_t flags, fd_t fd_
         return _EINVAL;
 
     write_wrlock(&current->mem->lock);
-    addr_t res = do_mmap(addr, len, prot, flags, fd_no, NULL, (dword_t)offset);
+    addr_t res = do_mmap(addr, len, prot, flags, fd_no, NULL, offset);
     write_wrunlock(&current->mem->lock);
     return res;
 }
@@ -408,8 +408,8 @@ static addr_t do_mremap_grow(addr_t addr, pages_t old_pages, pages_t new_pages, 
     return new_start << PAGE_BITS;
 }
 
-addr_t sys_mremap(addr_t addr, dword_t old_len, dword_t new_len, dword_t flags) {
-    STRACE("mremap(%#x, %#x, %#x, %d)", addr, old_len, new_len, flags);
+addr_t sys_mremap(addr_t addr, addr_t old_len, addr_t new_len, dword_t flags) {
+    STRACE("mremap(%#llx, %#llx, %#llx, %d)", (unsigned long long) addr, (unsigned long long) old_len, (unsigned long long) new_len, flags);
     if (PGOFFSET(addr) != 0)
         return _EINVAL;
     if (flags & ~(MREMAP_MAYMOVE_ | MREMAP_FIXED_))

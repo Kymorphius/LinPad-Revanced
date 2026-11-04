@@ -143,6 +143,8 @@ struct posix_timer {
     int_t timer_id;
     struct tgroup *tgroup;
     pid_t_ thread_pid;
+    bool thread_directed; // SIGEV_THREAD_ID: to thread_pid alone, not the process
+    int_t overrun_last; // overrun of the signal most recently taken, for timer_getoverrun
     int_t signal;
     union sigval_ sig_value;
 };
@@ -167,6 +169,11 @@ struct tgroup {
     struct posix_timer posix_timers[TIMERS_MAX];
 
     struct rlimit_ limits[RLIMIT_NLIMITS_];
+
+    // Signals sent to the process as a whole, waiting for a thread to take them.
+    // Locked by the sighand lock, which every thread of the group shares.
+    sigset_t_ shared_pending;
+    struct list shared_queue;
 
     // From https://twitter.com/tblodt/status/957706819236904960
     // > there are two distinct ways for a p̶r̶o̶c̶e̶s̶s̶ thread group to exit:
@@ -204,6 +211,16 @@ struct tgroup {
     // for everything in this struct not locked by something else
     lock_t lock;
 };
+
+// Signals waiting for `task` that it does not block: its own and its process's.
+// Read with the sighand lock held, or accept a stale answer.
+static inline sigset_t_ task_pending_unblocked(struct task *task) {
+    return (task->pending | task->group->shared_pending) & ~task->blocked;
+}
+// Everything waiting for `task`, blocked or not.
+static inline sigset_t_ task_pending_all(struct task *task) {
+    return task->pending | task->group->shared_pending;
+}
 
 static inline bool task_is_leader(struct task *task) {
     return task->group->leader == task;

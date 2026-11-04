@@ -177,9 +177,66 @@ int_t sys_setgroups(dword_t size, addr_t list) {
     return 0;
 }
 
-// this does not really work
+#define LINUX_CAPABILITY_VERSION_1 0x19980330
+#define LINUX_CAPABILITY_VERSION_2 0x20071026
+#define LINUX_CAPABILITY_VERSION_3 0x20080522
+// CAP_LAST_CAP is 40 (CAP_CHECKPOINT_RESTORE): bits 0-31 in the first word, 32-40 in the second.
+#define CAP_FULL_SET_LOW 0xffffffffu
+#define CAP_FULL_SET_HIGH 0x000001ffu
+
+struct cap_header_ {
+    uint32_t version;
+    int32_t pid;
+};
+struct cap_data_ {
+    uint32_t effective;
+    uint32_t permitted;
+    uint32_t inheritable;
+};
+
+// Capabilities are not enforced, only reported: root holds every capability, anyone else none.
 int_t sys_capget(addr_t header_addr, addr_t data_addr) {
     STRACE("capget(%#x, %#x)", header_addr, data_addr);
+    struct cap_header_ header;
+    if (user_get(header_addr, header))
+        return _EFAULT;
+    int words;
+    switch (header.version) {
+        case LINUX_CAPABILITY_VERSION_1: words = 1; break;
+        case LINUX_CAPABILITY_VERSION_2:
+        case LINUX_CAPABILITY_VERSION_3: words = 2; break;
+        default:
+            // report the version we speak, as Linux does, and fail
+            header.version = LINUX_CAPABILITY_VERSION_3;
+            if (user_put(header_addr, header))
+                return _EFAULT;
+            return data_addr == 0 ? 0 : _EINVAL;
+    }
+    if (header.pid < 0)
+        return _EINVAL;
+    if (data_addr == 0)
+        return 0;
+
+    bool full;
+    if (header.pid == 0 || header.pid == current->pid) {
+        full = current->euid == 0;
+    } else {
+        lock(&pids_lock);
+        struct task *task = pid_get_task(header.pid);
+        if (task == NULL) {
+            unlock(&pids_lock);
+            return _ESRCH;
+        }
+        full = task->euid == 0;
+        unlock(&pids_lock);
+    }
+    struct cap_data_ data[2] = {};
+    if (full) {
+        data[0].effective = data[0].permitted = CAP_FULL_SET_LOW;
+        data[1].effective = data[1].permitted = CAP_FULL_SET_HIGH;
+    }
+    if (user_write(data_addr, data, words * sizeof(data[0])))
+        return _EFAULT;
     return 0;
 }
 int_t sys_capset(addr_t header_addr, addr_t data_addr) {

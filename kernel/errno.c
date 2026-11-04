@@ -98,8 +98,10 @@ int err_map(int err) {
     return -(err | 0x1000);
 }
 
+_Thread_local bool errno_suppress_sigpipe;
+
 int errno_map() {
-    if (errno == EPIPE && current != NULL)
+    if (errno == EPIPE && current != NULL && !errno_suppress_sigpipe)
         send_signal(current, SIGPIPE_, SIGINFO_NIL);
     return err_map(errno);
 }

@@ -235,7 +235,7 @@ static int futex_wait_bitset(addr_t uaddr, dword_t val, struct timespec *timeout
             }
             if (current->sighand) {
                 lock(&current->sighand->lock);
-                bool sig_pending = !!(current->pending & ~current->blocked);
+                bool sig_pending = !!task_pending_unblocked(current);
                 unlock(&current->sighand->lock);
                 if (sig_pending) { err = _EINTR; break; }
             }

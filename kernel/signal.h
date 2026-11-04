@@ -118,9 +118,15 @@ static const struct siginfo_ SIGINFO_NIL = {
     .code = SI_KERNEL_,
 };
 
+// First real-time signal: instances of these are queued one by one, standard signals coalesce.
+#define SIGRTMIN_ 32
+
 struct sigqueue {
     struct list queue;
     struct siginfo_ info;
+    // charged against the target user's RLIMIT_SIGPENDING until freed
+    bool charged;
+    uid_t_ charged_uid;
 };
 
 struct sigevent_ {
@@ -141,7 +147,18 @@ struct sigevent_ {
 
 // send a signal
 // you better make sure the task isn't gonna get freed under me (pids_lock or current)
+// A thread-directed signal: queued on `task` itself (tkill, faults, SIGPIPE).
 void send_signal(struct task *task, int sig, struct siginfo_ info);
+// A process-directed signal: queued on task's thread group and taken by any thread that does not
+// block it (kill, sigqueue, SIGCHLD, timers). Call with pids_lock held.
+void send_process_signal(struct task *task, int sig, struct siginfo_ info);
+// Either of the above, but report EAGAIN when RLIMIT_SIGPENDING leaves no room for a queued
+// real-time signal, as sigqueue(3) must. thread_directed picks the queue.
+int send_signal_checked(struct task *task, int sig, struct siginfo_ info, bool thread_directed);
+// Take the next signal in `mask` off the current thread: its own queue first, then its process's,
+// lowest number first and in order within a number. Call with the sighand lock held.
+struct sigqueue *dequeue_signal(sigset_t_ mask);
+void sigqueue_free(struct sigqueue *sigqueue);
 // send a signal without regard for whether the signal is blocked or ignored
 void deliver_signal(struct task *task, int sig, struct siginfo_ info);
 // send a signal to current if it's not blocked or ignored, return whether that worked
@@ -224,6 +241,8 @@ int_t sys_rt_sigtimedwait(addr_t set_addr, addr_t info_addr, addr_t timeout_addr
 dword_t sys_kill(pid_t_ pid, dword_t sig);
 dword_t sys_tkill(pid_t_ tid, dword_t sig);
 dword_t sys_tgkill(pid_t_ tgid, pid_t_ tid, dword_t sig);
+dword_t sys_rt_sigqueueinfo(pid_t_ pid, dword_t sig, addr_t info_addr);
+dword_t sys_rt_tgsigqueueinfo(pid_t_ tgid, pid_t_ tid, dword_t sig, addr_t info_addr);
 
 // signal frame structs. There's a good chance this should go in its own header file
 

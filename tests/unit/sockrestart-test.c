@@ -174,6 +174,40 @@ static void test_tcp_reclaimed(void) {
     printf("PASS reclaimed TCP listener rebuilt on the same descriptor, port and flags\n");
 }
 
+// A fired EPOLLONESHOT entry must stay off the host set across a rebuild,
+// until the guest re-arms it with EPOLL_CTL_MOD.
+static void test_oneshot_stays_disarmed(void) {
+    unsigned port;
+    struct fd fd;
+    int host = tcp_listener(&port);
+    guest_socket(&fd, host, O_NONBLOCK_);
+    sockrestart_begin_listen(&fd, 8);
+    struct poll *poll = poll_create();
+    CHECK(!IS_ERR(poll));
+    int types = POLL_READ | POLL_ONESHOT;
+    CHECK(poll_add_fd(poll, &fd, types, (union poll_fd_info) {0}) == 0);
+    int c1 = tcp_connect(port);
+    CHECK(wait_readable(poll) & POLL_READ); // fires once, then disarmed
+    CHECK(wait_readable(poll) == 0);
+
+    reclaim(host);
+    CHECK(sockrestart_repair_after_accept_error(&fd, EINVAL));
+    int c2 = tcp_connect(port);
+    CHECK(wait_readable(poll) == 0); // the rebuild did not re-arm it
+    CHECK(poll_mod_fd(poll, &fd, types, (union poll_fd_info) {0}) == 0);
+    CHECK(wait_readable(poll) & POLL_READ);
+    int a = accept(host, NULL, NULL);
+    CHECK(a >= 0);
+    close(a);
+    close(c1);
+    close(c2);
+    poll_del_fd(poll, &fd);
+    poll_destroy(poll);
+    sockrestart_end_listen(&fd);
+    close(host);
+    printf("PASS rebuild leaves a fired EPOLLONESHOT entry disarmed until re-armed\n");
+}
+
 static void test_port_taken(void) {
     unsigned port;
     struct fd fd;
@@ -268,6 +302,7 @@ int main(void) {
     alarm(20);
     test_routine_and_intact();
     test_tcp_reclaimed();
+    test_oneshot_stays_disarmed();
     test_port_taken();
     test_spinning_but_healthy();
     test_unix_reclaimed(dir);

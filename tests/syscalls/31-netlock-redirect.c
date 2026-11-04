@@ -101,6 +101,31 @@ int main(void) {
     close(accepted);
     close(client);
 
+    // a uid with a proxy of its own
+    int listener2 = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in proxy2 = addr("127.0.0.1", 0);
+    len = sizeof(proxy2);
+    bind(listener2, (struct sockaddr *) &proxy2, sizeof(proxy2));
+    listen(listener2, 4);
+    getsockname(listener2, (struct sockaddr *) &proxy2, &len);
+    snprintf(text, sizeof(text), "uid_port 902 %u\n", ntohs(proxy2.sin_port));
+    CHECK(control(text) == 0, "uid 902 gets port %u", ntohs(proxy2.sin_port));
+    seteuid(902);
+    client = socket(AF_INET, SOCK_STREAM, 0);
+    r = connect(client, (struct sockaddr *) &outside, sizeof(outside));
+    seteuid(0);
+    CHECK(r == 0, "uid 902 reaches its own proxy: %d errno %d", r, r ? errno : 0);
+    accepted = accept(listener2, NULL, NULL);
+    memset(&original, 0, sizeof(original));
+    len = sizeof(original);
+    r = getsockopt(accepted, SOL_IP, SO_ORIGINAL_DST, &original, &len);
+    inet_ntop(AF_INET, &original.sin_addr, ip, sizeof(ip));
+    CHECK(accepted >= 0 && r == 0 && strcmp(ip, "192.0.2.1") == 0, "its SO_ORIGINAL_DST = %d: %s", r, ip);
+    close(accepted);
+    close(client);
+    close(listener2);
+    CHECK(control("uid_port 902 0\n") == 0, "uid 902 back to the common port");
+
     CHECK(control("lease 0\n") == 0, "lease lapses");
     e = try_connect(SOCK_STREAM, outside);
     CHECK(e == EPERM, "TCP to the outside after the lease: errno %d", e);

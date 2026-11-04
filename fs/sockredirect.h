@@ -12,6 +12,8 @@
 //                     nor locked (the proxy's own outbound connections)
 //   lease N           redirect for the next N seconds (0..3600); renew it
 //   bypass CIDR...    destinations left alone (replaces the list)
+//   uid_port UID PORT connections by effective uid UID go to PORT instead of
+//                     tcp_port (a proxy inbound of its own); PORT 0 removes it
 //   netlock on|off    fail closed (below)
 // Loopback and unspecified destinations are never redirected. An address that
 // is none of these nor on the bypass list is "outside".

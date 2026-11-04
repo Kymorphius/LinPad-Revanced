@@ -150,6 +150,39 @@ static int datagram(struct sockaddr_storage dst, unsigned euid) {
 
 // Fail closed: nothing reaches an outside address except through the proxy or
 // as the exempt uid, whether the lease is current or not.
+// A uid with a proxy port of its own (a dedicated inbound for one identity).
+static void test_uid_ports(void) {
+    char t[80];
+    CHECK(update("tcp_port 7890\nexempt_uid 901\nlease 30\nbypass 10.0.0.0/8\nuid_port 902 7893\n", 0) == 0);
+    CHECK(strstr(show(), "uid_port 902 7893\n"));
+    CHECK(target_text(v4("93.184.216.34", 443), 902, 0, t) && strcmp(t, "127.0.0.1:7893") == 0);
+    CHECK(target_text(v6("2001:db8::1", 443), 902, 0, t) && strcmp(t, "[::1]:7893") == 0);
+    CHECK(target_text(v4("93.184.216.34", 443), 1000, 0, t) && strcmp(t, "127.0.0.1:7890") == 0);
+    CHECK(verdict(v4("93.184.216.34", 443), 901, 0, t) == 0);
+    CHECK(verdict(v4("10.1.2.3", 22), 902, 0, t) == 0); // the bypass list holds for it too
+    CHECK(update("uid_port 902 7894\n", 0) == 0 && strstr(show(), "uid_port 902 7894\n"));
+    CHECK(update("uid_port 902\n", 0) == _EINVAL);
+    CHECK(update("uid_port x 1\n", 0) == _EINVAL);
+    CHECK(update("uid_port 902 70000\n", 0) == _EINVAL);
+    CHECK(update("uid_port 902 \n", 0) == _EINVAL);
+    for (unsigned uid = 2000; uid < 2007; uid++) {
+        char line[40];
+        snprintf(line, sizeof(line), "uid_port %u 7000\n", uid);
+        CHECK(update(line, 0) == 0);
+    }
+    CHECK(update("uid_port 3000 7000\n", 0) == _ENOSPC);
+    for (unsigned uid = 2000; uid < 2007; uid++) {
+        char line[40];
+        snprintf(line, sizeof(line), "uid_port %u 0\n", uid);
+        CHECK(update(line, 0) == 0);
+    }
+    // without a lease it is blocked under the netlock like everyone
+    CHECK(update("lease 0\nnetlock on\n", 0) == 0);
+    CHECK(verdict(v4("93.184.216.34", 443), 902, 0, t) == _EPERM);
+    CHECK(update("netlock off\nuid_port 902 0\n", 0) == 0 && !strstr(show(), "uid_port"));
+    printf("PASS a uid's own proxy port, its lease and netlock, and control errors\n");
+}
+
 static void test_netlock(void) {
     char t[80];
     CHECK(update("tcp_port 7890\nexempt_uid 901\nlease 0\nbypass 10.0.0.0/8 100.64.0.0/10 fe80::/10\n", 0) == 0);
@@ -266,6 +299,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     test_policy();
     test_netlock();
+    test_uid_ports();
     test_original_destination();
     return 0;
 }

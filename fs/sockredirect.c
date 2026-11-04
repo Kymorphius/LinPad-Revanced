@@ -11,6 +11,7 @@
 #include "util/sync.h"
 
 #define MAX_BYPASS 32
+#define MAX_UID_PORTS 8
 #define MAX_LEASE_SECONDS 3600
 #define NS_PER_SEC 1000000000ull
 
@@ -33,6 +34,12 @@ struct config {
     uint64_t lease_until_ns;
     unsigned nbypass;
     struct cidr bypass[MAX_BYPASS];
+    // uids whose connections go to a proxy port of their own
+    unsigned nuid_ports;
+    struct {
+        unsigned uid;
+        uint16_t port;
+    } uid_ports[MAX_UID_PORTS];
 };
 
 // The original destination of one redirected client socket, keyed by the
@@ -196,6 +203,14 @@ static bool is_outside(const struct sockaddr_storage *addr) {
     return true;
 }
 
+// The caller holds lock. The proxy port for euid, 0 for none.
+static uint16_t proxy_port(unsigned euid) {
+    for (unsigned i = 0; i < config.nuid_ports; i++)
+        if (config.uid_ports[i].uid == euid)
+            return config.uid_ports[i].port;
+    return config.tcp_port;
+}
+
 int sockredirect_tcp(const struct sockaddr *dst, unsigned euid, uint16_t fixed_port,
         struct sockaddr_storage *target, socklen_t *target_len) {
     struct sockaddr_storage d;
@@ -208,8 +223,9 @@ int sockredirect_tcp(const struct sockaddr *dst, unsigned euid, uint16_t fixed_p
         load_defaults();
         int verdict = 0;
         if (!is_exempt(euid) && is_outside(&d)) {
-            if (config.tcp_port != 0 && now_ns() < config.lease_until_ns) {
-                port = config.tcp_port;
+            uint16_t proxy = proxy_port(euid);
+            if (proxy != 0 && now_ns() < config.lease_until_ns) {
+                port = proxy;
                 redirected_total++;
                 verdict = 1;
             } else if (atomic_load(&netlock)) {
@@ -384,6 +400,8 @@ void sockredirect_show(struct proc_data *buf) {
         proc_printf(buf, "exempt_uid none\n");
     proc_printf(buf, "lease_remaining %llu\n",
             (unsigned long long) (active ? (config.lease_until_ns - now + NS_PER_SEC - 1) / NS_PER_SEC : 0));
+    for (unsigned i = 0; i < config.nuid_ports; i++)
+        proc_printf(buf, "uid_port %u %u\n", config.uid_ports[i].uid, config.uid_ports[i].port);
     proc_printf(buf, "bypass");
     for (unsigned i = 0; i < config.nbypass; i++) {
         char text[INET6_ADDRSTRLEN];
@@ -428,6 +446,28 @@ int sockredirect_update(const char *text, size_t size, unsigned euid) {
             next.exempt_uid = (unsigned) n;
         } else if (strcmp(line, "lease") == 0 && number && n <= MAX_LEASE_SECONDS) {
             next.lease_until_ns = n ? now_ns() + n * NS_PER_SEC : 0;
+        } else if (strcmp(line, "uid_port") == 0 && value != NULL) {
+            // "uid_port UID PORT": UID's connections go to PORT; PORT 0 removes it
+            char *end_uid = NULL, *end_port = NULL;
+            unsigned long uid = strtoul(value, &end_uid, 10);
+            unsigned long uport = end_uid != value && *end_uid == ' ' ? strtoul(end_uid + 1, &end_port, 10) : 70000;
+            if (end_port == NULL || *end_port != '\0' || end_port == end_uid + 1 || uport > 65535 || uid > 0xffffffffUL) {
+                err = _EINVAL;
+                continue;
+            }
+            unsigned i = 0;
+            while (i < next.nuid_ports && next.uid_ports[i].uid != uid)
+                i++;
+            if (uport == 0) {
+                if (i < next.nuid_ports)
+                    next.uid_ports[i] = next.uid_ports[--next.nuid_ports];
+            } else if (i < next.nuid_ports) {
+                next.uid_ports[i].port = (uint16_t) uport;
+            } else if (next.nuid_ports == MAX_UID_PORTS) {
+                err = _ENOSPC;
+            } else {
+                next.uid_ports[next.nuid_ports++] = (typeof(next.uid_ports[0])) {(unsigned) uid, (uint16_t) uport};
+            }
         } else if (strcmp(line, "netlock") == 0 && value != NULL &&
                 (strcmp(value, "on") == 0 || strcmp(value, "off") == 0)) {
             next_netlock = strcmp(value, "on") == 0;

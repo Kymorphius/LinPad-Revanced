@@ -61,6 +61,15 @@ The Mac and iPad must be able to reach each other over the network. Find the
 address in the iPad's Wi-Fi settings, or run `ifconfig en0` in a working guest
 session. The client uses IPv4.
 
+When LinPad is a node on your tailnet, `ts` connects to it there, on the same port:
+
+```sh
+LINPAD_TS_HOST='<tailnet-address-or-name>' ./tools/ipad_ssh.sh ts
+```
+
+Without `LINPAD_TS_HOST` it reads `~/.config/linpad/ts-host`, then tries the
+name `linpad`.
+
 Pass a remote command after the transport argument:
 
 ```sh

@@ -4,14 +4,15 @@ set -eu
 umask 077
 
 usage() {
-    printf '%s\n' 'Usage: ipad_ssh.sh [usb|wifi] [ssh command arguments...]' \
+    printf '%s\n' 'Usage: ipad_ssh.sh [usb|wifi|ts] [ssh command arguments...]' \
         'Wi-Fi host: LINPAD_WIFI_HOST (default iPad.local)' \
+        'Tailnet host: LINPAD_TS_HOST, ~/.config/linpad/ts-host or linpad (MagicDNS)' \
         'USB device: LINPAD_DEVICE_UDID or ~/.config/linpad/ssh-device-udid'
 }
 
 mode=${1:-usb}
 case "$mode" in
-    usb|wifi) [ "$#" -eq 0 ] || shift ;;
+    usb|wifi|ts) [ "$#" -eq 0 ] || shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
@@ -37,8 +38,16 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [ "$mode" = wifi ]; then
-    host=${LINPAD_WIFI_HOST:-iPad.local}
+if [ "$mode" = wifi ] || [ "$mode" = ts ]; then
+    if [ "$mode" = ts ]; then
+        host=${LINPAD_TS_HOST:-}
+        if [ -z "$host" ] && [ -f "$HOME/.config/linpad/ts-host" ]; then
+            IFS= read -r host < "$HOME/.config/linpad/ts-host" || :
+        fi
+        host=${host:-linpad}
+    else
+        host=${LINPAD_WIFI_HOST:-iPad.local}
+    fi
     port=2222
 else
     host=127.0.0.1

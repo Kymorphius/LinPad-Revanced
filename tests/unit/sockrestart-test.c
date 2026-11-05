@@ -148,7 +148,7 @@ static void test_tcp_reclaimed(void) {
     sockrestart_begin_listen(&fd, 8);
     struct poll *poll = poll_create();
     CHECK(!IS_ERR(poll));
-    CHECK(poll_add_fd(poll, &fd, POLL_READ | POLL_HUP | POLL_ERR, (union poll_fd_info) {0}) == 0);
+    CHECK(poll_add_fd(poll, &fd, -1, POLL_READ | POLL_HUP | POLL_ERR, (union poll_fd_info) {0}) == 0);
 
     reclaim(host);
     CHECK(is_fifo(host));
@@ -167,7 +167,7 @@ static void test_tcp_reclaimed(void) {
     CHECK(a >= 0);
     close(a);
     close(c);
-    poll_del_fd(poll, &fd);
+    poll_del_fd(poll, &fd, -1);
     poll_destroy(poll);
     sockrestart_end_listen(&fd);
     close(host);
@@ -185,7 +185,7 @@ static void test_oneshot_stays_disarmed(void) {
     struct poll *poll = poll_create();
     CHECK(!IS_ERR(poll));
     int types = POLL_READ | POLL_ONESHOT;
-    CHECK(poll_add_fd(poll, &fd, types, (union poll_fd_info) {0}) == 0);
+    CHECK(poll_add_fd(poll, &fd, -1, types, (union poll_fd_info) {0}) == 0);
     int c1 = tcp_connect(port);
     CHECK(wait_readable(poll) & POLL_READ); // fires once, then disarmed
     CHECK(wait_readable(poll) == 0);
@@ -194,14 +194,14 @@ static void test_oneshot_stays_disarmed(void) {
     CHECK(sockrestart_repair_after_accept_error(&fd, EINVAL));
     int c2 = tcp_connect(port);
     CHECK(wait_readable(poll) == 0); // the rebuild did not re-arm it
-    CHECK(poll_mod_fd(poll, &fd, types, (union poll_fd_info) {0}) == 0);
+    CHECK(poll_mod_fd(poll, &fd, -1, types, (union poll_fd_info) {0}) == 0);
     CHECK(wait_readable(poll) & POLL_READ);
     int a = accept(host, NULL, NULL);
     CHECK(a >= 0);
     close(a);
     close(c1);
     close(c2);
-    poll_del_fd(poll, &fd);
+    poll_del_fd(poll, &fd, -1);
     poll_destroy(poll);
     sockrestart_end_listen(&fd);
     close(host);

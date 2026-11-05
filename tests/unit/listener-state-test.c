@@ -83,7 +83,7 @@ static int new_bound_socket(struct sockaddr_in *address, bool listening) {
 static struct poll *new_poll(struct fd *member) {
     struct poll *poll = poll_create();
     CHECK(!IS_ERR(poll));
-    CHECK(poll_add_fd(poll, member, POLL_READ | POLL_HUP | POLL_ERR,
+    CHECK(poll_add_fd(poll, member, -1, POLL_READ | POLL_HUP | POLL_ERR,
                 (union poll_fd_info) {0}) == 0);
     return poll;
 }

@@ -87,6 +87,9 @@ struct fd {
             // connected directly to an outside address (fs/sockredirect.h): its
             // sends are checked against the netlock
             bool inet_peer_outside;
+            // the host interface the socket is scoped to (SO_BINDTOIFINDEX,
+            // SO_BINDTODEVICE), by index, or 0
+            unsigned bound_ifindex;
             // credentials of the last message sent to this end, recorded at
             // send time so they survive the sender closing (SCM_CREDENTIALS)
             struct ucred_ unix_recv_cred;

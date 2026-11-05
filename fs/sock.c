@@ -735,14 +735,14 @@ int_t sys_accept(fd_t sock_fd, addr_t sockaddr_addr, addr_t sockaddr_len_addr) {
     bool repaired = false;
 retry:
     do {
-        sockrestart_begin_listen_wait(sock);
+        sockrestart_begin_listen_wait();
         errno = 0;
         sockaddr_len = sockaddr_cap;
         client = accept(sock->real_fd,
                 sockaddr_addr != 0 ? (void *) sockaddr : NULL,
                 sockaddr_addr != 0 ? &sockaddr_len : NULL);
         accept_errno = errno;
-        sockrestart_end_listen_wait(sock);
+        sockrestart_end_listen_wait();
         // A listener rebuilt under a blocked accept fails it with EINTR or with
         // the error of the closed descriptor; either way, wait again.
     } while (client < 0 && sockrestart_should_restart_listen_wait());

@@ -540,10 +540,6 @@ static bool unix_cred_take(struct fd *sock, bool peek, struct ucred_ *out) {
     return found;
 }
 
-// The host connect() for a guest connect() or fast-open send: while the
-// transparent proxy holds its lease, an outside TCP destination is replaced by
-// the proxy, and the original is kept for its SO_ORIGINAL_DST query. Under the
-// netlock, what may not reach the outside fails with EPERM (fs/sockredirect.h).
 // Scopes the host socket of an inet socket to interface index (0: none), as
 // Linux's SO_BINDTOIFINDEX does: on Darwin IP_BOUND_IF, IPV6_BOUND_IF (which
 // also covers an IPv6 socket's IPv4-mapped traffic). Other sockets ignore it.
@@ -587,6 +583,10 @@ static int sock_bind_interface(struct fd *sock, dword_t option, const char *valu
     return 0;
 }
 
+// The host connect() for a guest connect() or fast-open send: while the
+// transparent proxy holds its lease, an outside TCP destination is replaced by
+// the proxy, and the original is kept for its SO_ORIGINAL_DST query. Under the
+// netlock, what may not reach the outside fails with EPERM (fs/sockredirect.h).
 static int sock_host_connect(struct fd *sock, struct sockaddr_max_ *sockaddr, socklen_t len) {
     const struct sockaddr *dst = (const struct sockaddr *) sockaddr;
     bool inet = sock->socket.domain == AF_INET_ || sock->socket.domain == AF_INET6_;

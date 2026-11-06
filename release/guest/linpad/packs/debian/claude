@@ -1,0 +1,6 @@
+#!/bin/sh
+# Placeholder ahead of PATH in the Debian chroot, installed where LinPad gates Claude Code
+# (claude-gate checks the egress lock and applies the managed settings): run it in Alpine.
+echo "claude: run Claude Code in LinPad (Alpine), not in Debian: leave with exit, then run claude." >&2
+echo "        It can build here with: debian <command>, e.g. debian make" >&2
+exit 78

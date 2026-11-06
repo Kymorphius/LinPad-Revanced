@@ -139,6 +139,20 @@
       "recommended": false
     },
     {
+      "id": "debian",
+      "name": "Debian (glibc)",
+      "description": "A full Debian 12 system next to LinPad's Alpine, for software built for glibc: apt and Debian's packages, compilers, Flutter, vendor Linux builds. Open a terminal and run debian (as root, or as a member of the group debian, who then work as themselves). Downloaded on this iPad; about 470 MB to start, more as you install. Needs a LinPad build that runs glibc programs.",
+      "category": "Development",
+      "sizeMB": 470,
+      "installer": "sh /usr/local/share/linpad/packs/debian/install.sh",
+      "uninstaller": "/usr/local/share/linpad/packs/debian/uninstall.sh",
+      "check": "/srv/debian/usr/bin/apt-get",
+      "launch": "debian cat /etc/debian_version",
+      "cli": true,
+      "recommended": false,
+      "experimental": true
+    },
+    {
       "id": "wine",
       "name": "Windows apps (Wine)",
       "description": "Runs Windows programs built for ARM64 (Notepad++, 7-Zip, PuTTY, Wine's own Notepad, Minesweeper and settings) in one Windows desktop window. Wine 10 from Debian, downloaded on this iPad. Direct3D 9 can draw on the iPad's GPU; Direct3D 10/11/12 games do not run (no DXVK or Proton on this GPU). About 600 MB, plus about 540 MB for the Windows folder the first program creates.",

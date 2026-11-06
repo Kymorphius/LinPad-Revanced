@@ -1,0 +1,18 @@
+#!/bin/sh
+# Prepares the Debian system at /srv/debian for chroot: /proc, /dev/pts, the device nodes and
+# /dev links, DNS. Runs at every launch (an /etc/inittab ::once: entry) and from `debian`;
+# safe to repeat.
+R=/srv/debian
+[ -x "$R/bin/bash" ] || exit 0
+node() { [ -e "$R/dev/$1" ] || mknod -m 666 "$R/dev/$1" "$2" "$3" "$4"; }
+mountpoint -q "$R/proc" 2>/dev/null || mount -t proc proc "$R/proc"
+[ -d "$R/dev/pts" ] || mkdir -p "$R/dev/pts"
+mountpoint -q "$R/dev/pts" 2>/dev/null || mount -t devpts devpts "$R/dev/pts"
+node null c 1 3; node zero c 1 5; node full c 1 7; node random c 1 8; node urandom c 1 9
+node tty c 5 0; node ptmx c 5 2
+[ -e "$R/dev/shm" ] || mkdir -m 1777 "$R/dev/shm"
+[ -e "$R/dev/fd" ] || [ -L "$R/dev/fd" ] || ln -s /proc/self/fd "$R/dev/fd"
+for i in 0:stdin 1:stdout 2:stderr; do
+    [ -e "$R/dev/${i#*:}" ] || [ -L "$R/dev/${i#*:}" ] || ln -s "/proc/self/fd/${i%%:*}" "$R/dev/${i#*:}"
+done
+cp /etc/resolv.conf "$R/etc/resolv.conf"

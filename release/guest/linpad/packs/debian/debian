@@ -1,0 +1,55 @@
+#!/bin/sh
+# Debian (glibc) next to LinPad's Alpine, for software that needs glibc (Flutter, vendor
+# builds, anything packaged for Debian). Installed by LinPad Store's Debian pack.
+#   debian            a login shell in /srv/debian
+#   debian CMD ARG..  run one command there (through a login shell, so profile.d applies)
+# root runs as root. Members of the group "debian" run as themselves: doas lets them run this
+# script, which chroots and then drops back to the caller, so the same uid (and whatever
+# LinPad applies to it, like per-user network rules) holds inside. The caller gets an account
+# in Debian with the same name, uid and gid the first time.
+R=/srv/debian
+if [ "$(id -u)" != 0 ]; then
+    exec doas /usr/local/bin/debian "$@"
+fi
+user=root
+[ -z "${DOAS_USER:-}" ] || user=$DOAS_USER
+/usr/local/sbin/debian-prepare || exit 1
+if [ "$user" != root ]; then
+    uid=$(id -u "$user") && gid=$(id -g "$user") || exit 1
+    if ! chroot "$R" /usr/bin/getent passwd "$uid" >/dev/null; then
+        group=$(id -gn "$user")
+        chroot "$R" /usr/bin/getent group "$gid" >/dev/null || chroot "$R" /usr/sbin/groupadd -g "$gid" "$group" || exit 1
+        chroot "$R" /usr/sbin/useradd -u "$uid" -g "$gid" -m -s /bin/bash "$user" || exit 1
+    fi
+    home=$(chroot "$R" /usr/bin/getent passwd "$uid" | cut -d: -f6)
+else
+    home=/root
+fi
+# The desktop's Wayland socket, linked in afresh (the desktop makes a new one when it restarts:
+# there is no bind mount to share the directory), so GTK and Flutter apps open windows on the
+# LinPad desktop. Only root may use it, as outside.
+gui=
+if [ "$user" = root ] && [ -S /tmp/xdg-runtime/wayland-0 ]; then
+    mkdir -p -m 700 "$R/tmp/xdg-runtime"
+    for s in wayland-0 wayland-0-gpu; do
+        rm -f "$R/tmp/xdg-runtime/$s"
+        [ ! -e "/tmp/xdg-runtime/$s" ] || ln "/tmp/xdg-runtime/$s" "$R/tmp/xdg-runtime/$s"
+    done
+    gui="XDG_RUNTIME_DIR=/tmp/xdg-runtime WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland"
+fi
+run=
+if [ "$user" != root ]; then
+    run="/usr/sbin/runuser -u $user --"
+    # group-writable by default, as Debian's user private groups do, so a tree shared through
+    # a group (an SDK in /opt) stays usable by the whole group
+    umask 002
+fi
+cd /
+if [ $# -eq 0 ]; then
+    set -- /bin/bash -l
+else
+    set -- /bin/bash -lc 'exec "$@"' bash "$@"
+fi
+exec chroot "$R" $run /usr/bin/env -i -C "$home" HOME="$home" USER="$user" LOGNAME="$user" \
+    TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    $gui "$@"
